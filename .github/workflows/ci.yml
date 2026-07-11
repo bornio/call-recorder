@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -20,16 +21,69 @@ jobs:
     timeout-minutes: 20
 
     steps:
+      # Keep this required job present for documentation-only pull requests.
+      # GitHub leaves path-filtered required workflows pending indefinitely.
+      - name: Detect build-relevant changes
+        id: changes
+        shell: zsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          run_build=false
+
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            changed_files="$(
+              gh api --paginate \
+                "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" \
+                --jq '.[].filename'
+            )"
+          else
+            before="$(jq -r '.before' "$GITHUB_EVENT_PATH")"
+            forced="$(jq -r '.forced' "$GITHUB_EVENT_PATH")"
+            declared_count="$(jq -r '.size' "$GITHUB_EVENT_PATH")"
+            included_count="$(jq -r '.commits | length' "$GITHUB_EVENT_PATH")"
+
+            if [[ "$before" == "0000000000000000000000000000000000000000" ||
+                  "$forced" == "true" ||
+                  "$declared_count" != "$included_count" ]]; then
+              run_build=true
+              changed_files=""
+            else
+              changed_files="$(
+                jq -r \
+                  '.commits[] | (.added[]?, .modified[]?, .removed[]?)' \
+                  "$GITHUB_EVENT_PATH"
+              )"
+            fi
+          fi
+
+          if [[ "$run_build" == "false" ]] && print -r -- "$changed_files" | \
+              grep -Eq '^(\.github/workflows/|App/|Sources/|Tests/|scripts/|Package\.(swift|resolved)$)'; then
+            run_build=true
+          fi
+
+          print -r -- "run_build=$run_build" >> "$GITHUB_OUTPUT"
+
       - name: Check out source
+        if: steps.changes.outputs.run_build == 'true'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           persist-credentials: false
 
       - name: Test
+        if: steps.changes.outputs.run_build == 'true'
         run: scripts/test.sh
 
       - name: Build release app
+        if: steps.changes.outputs.run_build == 'true'
         run: scripts/build-app.sh release
 
       - name: Verify Apple silicon architecture
+        if: steps.changes.outputs.run_build == 'true'
         run: test "$(lipo -archs '.build/Call Recorder.app/Contents/MacOS/CallRecorder')" = arm64
+
+      - name: Skip Swift build
+        if: steps.changes.outputs.run_build == 'false'
+        run: echo "No build-relevant files changed."
