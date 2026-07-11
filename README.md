@@ -7,28 +7,34 @@ call apps.
 
 ![Call Recorder menu](docs/call-recorder.png)
 
-## Download
+## Install a release
 
-Download the latest Apple silicon DMG from
-[GitHub Releases](https://github.com/bornio/call-recorder/releases/latest), open
-it, and drag Call Recorder to Applications. The release supports M1 and newer
-Macs running macOS 14.2 or later.
+Download an Apple silicon DMG from
+[GitHub Releases](https://github.com/bornio/call-recorder/releases), open it,
+and drag Call Recorder to Applications.
 
-The free release is ad-hoc signed rather than Apple-notarized. The first time
-you open it, macOS may require **System Settings → Privacy & Security → Open
+Release builds are ad-hoc signed rather than Apple-notarized. The first time you
+open one, macOS may require **System Settings → Privacy & Security → Open
 Anyway**. No Terminal commands are required.
 
 ## Requirements
 
 - An Apple silicon Mac (M1 or newer)
 - macOS 14.2 or later
-- Swift 6 with a matching macOS SDK, from Xcode or Command Line Tools
 - A [Deepgram](https://deepgram.com/) API key for transcription
 
-The project has no third-party code dependencies. Full Xcode is not required
-when compatible Command Line Tools are installed.
+Deepgram currently advertises $200 in free credit when signing up for Pay As
+You Go, with no credit card required and no expiration. That is enough to start
+using the app without an upfront payment. See
+[current Deepgram pricing](https://deepgram.com/pricing).
+Transcription uses that credit; speaker diarization and optional keyterm
+prompting are billed add-ons.
 
-## Build and install
+## Build from source
+
+Building requires Swift 6 with a matching macOS SDK from Xcode or Command Line
+Tools. The project has no third-party code dependencies, and full Xcode is not
+required when compatible Command Line Tools are installed.
 
 From the repository root:
 
@@ -57,9 +63,13 @@ For development, build and open the app in place:
 
 ## First use
 
+Record only when you have the consent required from every participant and when
+recording is legal in your jurisdiction.
+
 1. Click the waveform icon in the menu bar and open **Settings**.
-2. Save your Deepgram API key. It is stored in macOS Keychain and is never
-   displayed again or written to a recording.
+2. Create a Deepgram account, copy an API key, and save it in Settings. The key
+   is stored in macOS Keychain and is never displayed again or written to a
+   recording.
 3. Choose your transcript name, microphone, and output folder. **Automatic**
    prefers a microphone already active in another app, then the macOS default
    input. Optionally enable paid keyterm prompting for names and jargon.
