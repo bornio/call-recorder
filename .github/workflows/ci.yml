@@ -25,7 +25,7 @@ jobs:
       # GitHub leaves path-filtered required workflows pending indefinitely.
       - name: Detect build-relevant changes
         id: changes
-        shell: zsh
+        shell: zsh {0}
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
