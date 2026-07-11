@@ -1,0 +1,22 @@
+.build/
+.swiftpm/
+.DS_Store
+DerivedData/
+build/
+dist/
+Recordings/
+*.xcuserstate
+*.xccheckout
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*.json
+token*.json
+
+# Local recordings and intermediate audio never belong in source control.
+*.caf
+*.m4a
+*.wav
+.call-recorder-*.partial/
