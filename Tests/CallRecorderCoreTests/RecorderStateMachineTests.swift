@@ -21,6 +21,28 @@ func runRecorderStateMachineTests() throws {
         try expectEqual(machine.phase, .complete)
     }
 
+    try runTest("recording can pause, resume, and stop while paused") {
+        var machine = RecorderStateMachine()
+        try machine.transition(.start)
+        try machine.transition(.pause)
+        try expectEqual(machine.phase, .paused)
+        try machine.transition(.resume)
+        try expectEqual(machine.phase, .recording)
+        try machine.transition(.pause)
+        try machine.transition(.stop)
+        try expectEqual(machine.phase, .processing)
+    }
+
+    try runTest("active recording can be cancelled") {
+        var recording = RecorderStateMachine(phase: .recording)
+        try recording.transition(.cancel)
+        try expectEqual(recording.phase, .idle)
+
+        var paused = RecorderStateMachine(phase: .paused)
+        try paused.transition(.cancel)
+        try expectEqual(paused.phase, .idle)
+    }
+
     try runTest("retry can begin while app is idle") {
         var machine = RecorderStateMachine()
         try machine.transition(.retryTranscription)

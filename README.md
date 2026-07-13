@@ -75,8 +75,10 @@ recording is legal in your jurisdiction.
    input. Optionally enable paid keyterm prompting for names and jargon.
 4. Choose **Start Recording** and grant Microphone and System Audio Recording
    access when macOS asks.
-5. Choose **Stop Recording**. The app finalizes the local audio before starting
-   the Deepgram request.
+5. Pause and resume as needed, then choose **Stop Recording**. Paused intervals
+   are omitted from the saved audio. The app finalizes the local audio before
+   starting the Deepgram request. **Cancel Recording…** permanently discards the
+   current session after confirmation.
 
 If access was previously denied, use the permission buttons in Settings, grant
 access in System Settings, then quit and reopen Call Recorder.
@@ -119,6 +121,8 @@ overwriting an existing file and never takes ownership of imported audio.
 
 - Recording starts and stops only through explicit user actions and remains
   visibly indicated.
+- Pausing stops both audio tracks until you resume; cancelling deletes the
+  in-progress local session without transcribing it.
 - No transcription or network activity occurs while recording.
 - Deepgram requests use Nova-3 and opt the submitted audio out of model
   improvement.

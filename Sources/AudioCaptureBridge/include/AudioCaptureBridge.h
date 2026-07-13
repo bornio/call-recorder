@@ -66,6 +66,11 @@ int32_t cr_capture_copy_statistics(
     CRCaptureStatistics *out_statistics
 );
 
+int32_t cr_capture_set_paused(
+    CRCaptureHandle handle,
+    bool paused
+);
+
 int32_t cr_capture_stop(
     CRCaptureHandle handle,
     char *error_message,

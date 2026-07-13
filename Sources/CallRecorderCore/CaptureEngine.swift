@@ -134,6 +134,18 @@ public final class CaptureEngine: @unchecked Sendable {
         return statistics
     }
 
+    public func setPaused(_ paused: Bool) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else {
+            throw CaptureEngineError(code: -1, message: "No recording is active.")
+        }
+        let result = cr_capture_set_paused(handle, paused)
+        guard result == CR_CAPTURE_OK else {
+            throw CaptureEngineError(code: result, message: Self.errorName(result))
+        }
+    }
+
     @discardableResult
     public func stop() throws -> CaptureLiveStatistics {
         lock.lock()

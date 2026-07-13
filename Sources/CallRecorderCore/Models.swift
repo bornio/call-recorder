@@ -245,6 +245,7 @@ public struct RecordingManifest: Codable, Equatable, Identifiable, Sendable {
 public enum RecorderPhase: String, Sendable {
     case idle
     case recording
+    case paused
     case processing
     case transcribing
     case complete
@@ -253,7 +254,10 @@ public enum RecorderPhase: String, Sendable {
 
 public enum RecorderEvent: Equatable, Sendable {
     case start
+    case pause
+    case resume
     case stop
+    case cancel
     case finalized(transcriptionRequired: Bool)
     case transcriptionSucceeded
     case retryTranscription
@@ -276,7 +280,10 @@ public struct RecorderStateMachine: Sendable {
     public mutating func transition(_ event: RecorderEvent) throws {
         let next: RecorderPhase? = switch (phase, event) {
         case (.idle, .start), (.complete, .start), (.failed, .start): .recording
-        case (.recording, .stop): .processing
+        case (.recording, .pause): .paused
+        case (.paused, .resume): .recording
+        case (.recording, .stop), (.paused, .stop): .processing
+        case (.recording, .cancel), (.paused, .cancel): .idle
         case (.processing, .finalized(let required)): required ? .transcribing : .complete
         case (.transcribing, .transcriptionSucceeded): .complete
         case (.idle, .retryTranscription), (.complete, .retryTranscription),

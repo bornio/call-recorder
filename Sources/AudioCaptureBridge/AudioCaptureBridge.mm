@@ -254,9 +254,10 @@ public:
     OSStatus render_microphone(
         AudioUnit audio_unit,
         AudioUnitRenderActionFlags *flags,
-        const AudioTimeStamp *timestamp,
+        const AudioTimeStamp *render_timestamp,
         UInt32 bus,
-        UInt32 frames
+        UInt32 frames,
+        const AudioTimeStamp *writer_timestamp
     ) noexcept {
         const uint64_t sequence = callback_sequence_++;
         if (frames == 0 || frames > kMaximumFramesPerCallback) {
@@ -276,7 +277,7 @@ public:
         const OSStatus status = AudioUnitRender(
             audio_unit,
             flags,
-            timestamp,
+            render_timestamp,
             bus,
             frames,
             &buffer_list
@@ -296,13 +297,13 @@ public:
             peak = std::max(peak, std::fabs(destination[frame]));
         }
         slot->sequence = sequence;
-        slot->host_time = timestamp != nullptr &&
-                (timestamp->mFlags & kAudioTimeStampHostTimeValid) != 0
-            ? timestamp->mHostTime
+        slot->host_time = writer_timestamp != nullptr &&
+                (writer_timestamp->mFlags & kAudioTimeStampHostTimeValid) != 0
+            ? writer_timestamp->mHostTime
             : AudioGetCurrentHostTime();
-        slot->sample_time = timestamp != nullptr &&
-                (timestamp->mFlags & kAudioTimeStampSampleTimeValid) != 0
-            ? timestamp->mSampleTime
+        slot->sample_time = writer_timestamp != nullptr &&
+                (writer_timestamp->mFlags & kAudioTimeStampSampleTimeValid) != 0
+            ? writer_timestamp->mSampleTime
             : std::numeric_limits<double>::quiet_NaN();
         slot->frames = frames;
         level_.store(std::min(peak, 1.0f), std::memory_order_relaxed);
@@ -313,6 +314,35 @@ public:
 
     float level() const noexcept {
         return level_.load(std::memory_order_relaxed);
+    }
+
+    void clear_level() noexcept {
+        level_.store(0, std::memory_order_relaxed);
+    }
+
+    OSStatus render_microphone_discard(
+        AudioUnit audio_unit,
+        AudioUnitRenderActionFlags *flags,
+        const AudioTimeStamp *timestamp,
+        UInt32 bus,
+        UInt32 frames
+    ) noexcept {
+        if (frames == 0 || frames > kMaximumFramesPerCallback) {
+            return kAudio_ParamError;
+        }
+        AudioBufferList buffer_list{};
+        buffer_list.mNumberBuffers = 1;
+        buffer_list.mBuffers[0].mNumberChannels = 1;
+        buffer_list.mBuffers[0].mDataByteSize = frames * sizeof(float);
+        buffer_list.mBuffers[0].mData = scratch_.data();
+        return AudioUnitRender(
+            audio_unit,
+            flags,
+            timestamp,
+            bus,
+            frames,
+            &buffer_list
+        );
     }
 
     uint64_t captured_frames() const noexcept {
@@ -648,6 +678,29 @@ public:
         return error.empty() ? CR_CAPTURE_OK : CR_CAPTURE_ERROR_SYSTEM_IO;
     }
 
+    void set_paused(bool paused) noexcept {
+        if (paused) {
+            if (paused_.load(std::memory_order_acquire)) {
+                return;
+            }
+            pause_started_host_time_.store(AudioGetCurrentHostTime(), std::memory_order_relaxed);
+            paused_.store(true, std::memory_order_release);
+            system_writer_.clear_level();
+            microphone_writer_.clear_level();
+            return;
+        }
+
+        if (!paused_.load(std::memory_order_acquire)) {
+            return;
+        }
+        const uint64_t now = AudioGetCurrentHostTime();
+        const uint64_t started = pause_started_host_time_.load(std::memory_order_relaxed);
+        if (now > started) {
+            paused_host_time_.fetch_add(now - started, std::memory_order_relaxed);
+        }
+        paused_.store(false, std::memory_order_release);
+    }
+
     void copy_statistics(CRCaptureStatistics &statistics) const noexcept {
         statistics.running = running_.load(std::memory_order_acquire);
         statistics.system_level = system_writer_.level();
@@ -680,6 +733,9 @@ private:
         if (engine == nullptr || input == nullptr || input->mNumberBuffers == 0) {
             return noErr;
         }
+        if (engine->paused_.load(std::memory_order_acquire)) {
+            return noErr;
+        }
         const AudioBuffer &first_buffer = input->mBuffers[0];
         uint32_t frames = 0;
         if ((engine->system_format_.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0) {
@@ -690,11 +746,16 @@ private:
             frames = first_buffer.mDataByteSize /
                 (first_buffer.mNumberChannels * sizeof(float));
         }
+        AudioTimeStamp adjusted_time{};
+        const AudioTimeStamp *writer_time = engine->adjusted_timestamp(
+            input_time,
+            adjusted_time
+        );
         engine->system_writer_.push_downmixed(
             input,
             frames,
             engine->system_format_,
-            input_time
+            writer_time
         );
         return noErr;
     }
@@ -711,17 +772,54 @@ private:
         if (engine == nullptr || engine->microphone_unit_ == nullptr) {
             return kAudio_ParamError;
         }
+        if (engine->paused_.load(std::memory_order_acquire)) {
+            const OSStatus status = engine->microphone_writer_.render_microphone_discard(
+                engine->microphone_unit_,
+                flags,
+                timestamp,
+                1,
+                frames
+            );
+            if (status != noErr) {
+                engine->mark_fatal(CR_CAPTURE_ERROR_MICROPHONE_IO);
+            }
+            return status;
+        }
+        AudioTimeStamp adjusted_time{};
+        const AudioTimeStamp *writer_time = engine->adjusted_timestamp(
+            timestamp,
+            adjusted_time
+        );
         const OSStatus status = engine->microphone_writer_.render_microphone(
             engine->microphone_unit_,
             flags,
             timestamp,
             1,
-            frames
+            frames,
+            writer_time
         );
         if (status != noErr) {
             engine->mark_fatal(CR_CAPTURE_ERROR_MICROPHONE_IO);
         }
         return status;
+    }
+
+    const AudioTimeStamp *adjusted_timestamp(
+        const AudioTimeStamp *timestamp,
+        AudioTimeStamp &adjusted
+    ) const noexcept {
+        if (timestamp != nullptr) {
+            adjusted = *timestamp;
+        }
+        if ((adjusted.mFlags & kAudioTimeStampHostTimeValid) == 0) {
+            adjusted.mHostTime = AudioGetCurrentHostTime();
+            adjusted.mFlags |= kAudioTimeStampHostTimeValid;
+        }
+        const uint64_t paused_host_time = paused_host_time_.load(std::memory_order_relaxed);
+        if (adjusted.mHostTime >= paused_host_time) {
+            adjusted.mHostTime -= paused_host_time;
+        }
+        return &adjusted;
     }
 
     static OSStatus default_output_changed(
@@ -1290,6 +1388,9 @@ private:
     AudioWriter microphone_writer_;
     std::string microphone_uid_;
     std::atomic<bool> running_{false};
+    std::atomic<bool> paused_{false};
+    std::atomic<uint64_t> pause_started_host_time_{0};
+    std::atomic<uint64_t> paused_host_time_{0};
     std::atomic<int32_t> fatal_error_code_{CR_CAPTURE_OK};
     int32_t start_error_code_ = CR_CAPTURE_ERROR_SYSTEM_IO;
 
@@ -1360,6 +1461,14 @@ extern "C" int32_t cr_capture_copy_statistics(
         return CR_CAPTURE_ERROR_INVALID_CONFIGURATION;
     }
     static_cast<CaptureEngine *>(handle)->copy_statistics(*out_statistics);
+    return CR_CAPTURE_OK;
+}
+
+extern "C" int32_t cr_capture_set_paused(CRCaptureHandle handle, bool paused) {
+    if (handle == nullptr) {
+        return CR_CAPTURE_ERROR_INVALID_CONFIGURATION;
+    }
+    static_cast<CaptureEngine *>(handle)->set_paused(paused);
     return CR_CAPTURE_OK;
 }
 

@@ -16,6 +16,11 @@ private struct FinalizeOutcome: Sendable {
     var errorMessage: String?
 }
 
+private struct CancelOutcome: Sendable {
+    var statistics: CaptureLiveStatistics
+    var deletionErrorMessage: String?
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     static weak var shared: AppModel?
@@ -28,6 +33,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var captureStatistics: CaptureLiveStatistics = .empty
     @Published private(set) var hasDeepgramKey = false
     @Published private(set) var isStarting = false
+    @Published private(set) var isCancelling = false
     @Published private(set) var noticeMessage: String?
     @Published var errorMessage: String?
 
@@ -52,6 +58,8 @@ final class AppModel: ObservableObject {
     private var captureEngine: CaptureEngine?
     private var activeRecording: RecordingManifest?
     private var recordingStartedAt: Date?
+    private var pausedAt: Date?
+    private var accumulatedPausedSeconds: TimeInterval = 0
     private var capturePollTask: Task<Void, Never>?
     private var fatalStopRequested = false
     private var isMenuPresented = false
@@ -63,7 +71,12 @@ final class AppModel: ObservableObject {
     private let transcriptionService = TranscriptionService()
 
     var isBusy: Bool {
-        isStarting || phase == .recording || phase == .processing || phase == .transcribing
+        isStarting || isCancelling || isCaptureActive ||
+            phase == .processing || phase == .transcribing
+    }
+
+    var isCaptureActive: Bool {
+        phase == .recording || phase == .paused
     }
 
     var keytermCount: Int {
@@ -156,18 +169,68 @@ final class AppModel: ObservableObject {
     }
 
     func stopRecording() {
+        guard !isCancelling else { return }
         Task { await finishRecording(captureFailure: nil) }
+    }
+
+    func pauseRecording() {
+        guard phase == .recording, !isCancelling, let captureEngine else { return }
+        do {
+            try captureEngine.setPaused(true)
+            do {
+                try stateMachine.transition(.pause)
+            } catch {
+                try? captureEngine.setPaused(false)
+                throw error
+            }
+            let now = Date()
+            elapsedSeconds = floor(activeElapsed(at: now))
+            pausedAt = now
+            captureStatistics = captureEngine.statistics()
+            phase = stateMachine.phase
+            errorMessage = nil
+        } catch {
+            errorMessage = "Unable to pause recording: \(error.localizedDescription)"
+        }
+    }
+
+    func resumeRecording() {
+        guard phase == .paused, !isCancelling, let captureEngine else { return }
+        do {
+            try captureEngine.setPaused(false)
+            do {
+                try stateMachine.transition(.resume)
+            } catch {
+                try? captureEngine.setPaused(true)
+                throw error
+            }
+            let now = Date()
+            if let pausedAt {
+                accumulatedPausedSeconds += now.timeIntervalSince(pausedAt)
+            }
+            self.pausedAt = nil
+            phase = stateMachine.phase
+            errorMessage = nil
+        } catch {
+            errorMessage = "Unable to resume recording: \(error.localizedDescription)"
+        }
+    }
+
+    func cancelRecording() {
+        guard isCaptureActive, !isCancelling else { return }
+        isCancelling = true
+        Task { await discardActiveRecording() }
     }
 
     func setMenuPresented(_ presented: Bool) {
         isMenuPresented = presented
-        if presented, phase == .recording, let captureEngine {
+        if presented, isCaptureActive, let captureEngine {
             captureStatistics = captureEngine.statistics()
         }
     }
 
     func handleSystemSleep() {
-        guard phase == .recording, !fatalStopRequested else { return }
+        guard isCaptureActive, !fatalStopRequested, !isCancelling else { return }
         fatalStopRequested = true
         Task {
             await finishRecording(
@@ -333,12 +396,24 @@ final class AppModel: ObservableObject {
     func stopImmediatelyForTermination() {
         capturePollTask?.cancel()
         capturePollTask = nil
+        if isCancelling {
+            if let captureEngine {
+                _ = try? captureEngine.stop()
+            }
+            if let activeRecording {
+                try? store.delete(activeRecording)
+            }
+            captureEngine = nil
+            activeRecording = nil
+            resetCaptureTiming()
+            return
+        }
         guard let captureEngine, var recording = activeRecording else { return }
         let statistics = (try? captureEngine.stop()) ?? captureEngine.statistics()
         recording.captureStatus = .processing
         recording.stoppedAt = Date()
         recording.captureEndedAt = recording.stoppedAt
-        recording.durationSeconds = Date().timeIntervalSince(recording.effectiveStartedAt)
+        recording.durationSeconds = activeElapsed(at: recording.stoppedAt ?? Date())
         recording.captureSummary = statistics.summary
         recording.lastFailure = RecordingFailure(
             stage: .capture,
@@ -348,6 +423,7 @@ final class AppModel: ObservableObject {
         try? store.save(recording)
         self.captureEngine = nil
         activeRecording = nil
+        resetCaptureTiming()
     }
 
     private func beginRecording() async {
@@ -436,6 +512,8 @@ final class AppModel: ObservableObject {
             captureEngine = engine
             activeRecording = recording
             recordingStartedAt = startedAt
+            pausedAt = nil
+            accumulatedPausedSeconds = 0
             elapsedSeconds = 0
             captureStatistics = engine.statistics()
             fatalStopRequested = false
@@ -447,8 +525,70 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func discardActiveRecording() async {
+        guard isCaptureActive,
+              let engine = captureEngine,
+              var recording = activeRecording
+        else {
+            isCancelling = false
+            return
+        }
+        capturePollTask?.cancel()
+        capturePollTask = nil
+        fatalStopRequested = true
+
+        recording.captureStatus = .failed
+        recording.stoppedAt = Date()
+        recording.captureEndedAt = recording.stoppedAt
+        recording.durationSeconds = activeElapsed(at: recording.stoppedAt ?? Date())
+        recording.lastFailure = RecordingFailure(
+            stage: .capture,
+            message: "This recording was cancelled and could not be fully removed."
+        )
+        try? store.save(recording)
+        activeRecording = recording
+
+        let store = self.store
+        let outcome = await Task.detached { () -> CancelOutcome in
+            let statistics = (try? engine.stop()) ?? engine.statistics()
+            do {
+                try store.delete(recording)
+                return CancelOutcome(statistics: statistics, deletionErrorMessage: nil)
+            } catch {
+                return CancelOutcome(
+                    statistics: statistics,
+                    deletionErrorMessage: error.localizedDescription
+                )
+            }
+        }.value
+
+        captureEngine = nil
+        activeRecording = nil
+        captureStatistics = outcome.statistics
+        resetCaptureTiming()
+        isCancelling = false
+
+        if let deletionErrorMessage = outcome.deletionErrorMessage {
+            fail(
+                "Recording stopped, but its local files could not be removed: " +
+                    deletionErrorMessage
+            )
+        } else {
+            do {
+                try stateMachine.transition(.cancel)
+                phase = stateMachine.phase
+                errorMessage = nil
+                noticeMessage = "Recording cancelled."
+            } catch {
+                fail(error.localizedDescription)
+            }
+        }
+        reloadHistory()
+    }
+
     private func finishRecording(captureFailure: String?) async {
-        guard phase == .recording,
+        guard isCaptureActive,
+              !isCancelling,
               let engine = captureEngine,
               var recording = activeRecording
         else { return }
@@ -477,7 +617,7 @@ final class AppModel: ObservableObject {
         captureStatistics = stopOutcome.statistics
         recording.stoppedAt = stoppedAt
         recording.captureEndedAt = stoppedAt
-        recording.durationSeconds = stoppedAt.timeIntervalSince(recording.effectiveStartedAt)
+        recording.durationSeconds = activeElapsed(at: stoppedAt)
         recording.captureSummary = stopOutcome.statistics.summary
         recording.routeAfter = try? CaptureEngine.defaultAudioRoutes()
         if recording.captureSummary.totalDroppedFrames > 0 {
@@ -888,7 +1028,7 @@ final class AppModel: ObservableObject {
         capturePollTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(200))
-                guard let self, self.phase == .recording else { return }
+                guard let self, self.isCaptureActive else { return }
                 self.pollCapture()
             }
         }
@@ -902,16 +1042,30 @@ final class AppModel: ObservableObject {
             statistics.fatalErrorCode != captureStatistics.fatalErrorCode {
             captureStatistics = statistics
         }
-        if let recordingStartedAt {
-            let elapsed = floor(Date().timeIntervalSince(recordingStartedAt))
-            if elapsed != elapsedSeconds {
-                elapsedSeconds = elapsed
-            }
+        let elapsed = floor(activeElapsed(at: Date()))
+        if elapsed != elapsedSeconds {
+            elapsedSeconds = elapsed
         }
-        if let fatal = statistics.fatalErrorName, !fatalStopRequested {
+        if let fatal = statistics.fatalErrorName, !fatalStopRequested, !isCancelling {
             fatalStopRequested = true
             Task { await finishRecording(captureFailure: fatal) }
         }
+    }
+
+    private func activeElapsed(at date: Date) -> TimeInterval {
+        guard let recordingStartedAt else { return 0 }
+        let currentPause = pausedAt.map { date.timeIntervalSince($0) } ?? 0
+        return max(
+            0,
+            date.timeIntervalSince(recordingStartedAt) - accumulatedPausedSeconds - currentPause
+        )
+    }
+
+    private func resetCaptureTiming() {
+        recordingStartedAt = nil
+        pausedAt = nil
+        accumulatedPausedSeconds = 0
+        elapsedSeconds = 0
     }
 
     private func requestMicrophoneAccess() async -> Bool {

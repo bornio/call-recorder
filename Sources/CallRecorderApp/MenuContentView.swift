@@ -7,19 +7,36 @@ struct MenuBarLabelView: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: model.phase == .recording ? "record.circle.fill" : "waveform")
-            if model.phase == .recording {
+            Image(systemName: menuBarIcon)
+            if model.isCaptureActive {
                 Text(duration(model.elapsedSeconds))
                     .monospacedDigit()
             }
         }
-        .accessibilityLabel(model.phase == .recording ? "Recording call" : "Call Recorder")
+        .accessibilityLabel(menuBarAccessibilityLabel)
+    }
+
+    private var menuBarIcon: String {
+        switch model.phase {
+        case .recording: "record.circle.fill"
+        case .paused: "pause.circle.fill"
+        default: "waveform"
+        }
+    }
+
+    private var menuBarAccessibilityLabel: String {
+        switch model.phase {
+        case .recording: "Recording call"
+        case .paused: "Call recording paused"
+        default: "Call Recorder"
+        }
     }
 }
 
 struct MenuContentView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openWindow) private var openWindow
+    @State private var isConfirmingCancellation = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -30,13 +47,18 @@ struct MenuContentView: View {
                 Text(statusText)
                     .font(.headline)
                 Spacer()
-                if model.phase == .recording {
+                if model.isCaptureActive {
                     Text(duration(model.elapsedSeconds))
                         .monospacedDigit()
                 }
             }
 
-            if model.phase == .recording {
+            if model.isCaptureActive {
+                if model.phase == .paused {
+                    Label("Audio is not being recorded", systemImage: "pause.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 LevelRow(title: "System", value: model.captureStatistics.systemLevel)
                 LevelRow(title: "Microphone", value: model.captureStatistics.microphoneLevel)
                 if model.captureStatistics.summary.totalDroppedFrames > 0 {
@@ -80,14 +102,38 @@ struct MenuContentView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            if model.phase == .recording {
-                Button(role: .destructive) {
-                    model.stopRecording()
-                } label: {
-                    Label("Stop Recording", systemImage: "stop.circle.fill")
+            if model.isCaptureActive {
+                HStack {
+                    Button {
+                        if model.phase == .paused {
+                            model.resumeRecording()
+                        } else {
+                            model.pauseRecording()
+                        }
+                    } label: {
+                        Label(
+                            model.phase == .paused ? "Resume" : "Pause",
+                            systemImage: model.phase == .paused ? "play.fill" : "pause.fill"
+                        )
                         .frame(maxWidth: .infinity)
+                    }
+
+                    Button {
+                        model.stopRecording()
+                    } label: {
+                        Label("Stop", systemImage: "stop.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
                 }
                 .controlSize(.large)
+                .disabled(model.isCancelling)
+
+                Button("Cancel Recording…", role: .destructive) {
+                    isConfirmingCancellation = true
+                }
+                .frame(maxWidth: .infinity)
+                .disabled(model.isCancelling)
             } else {
                 Button {
                     model.startRecording()
@@ -128,13 +174,27 @@ struct MenuContentView: View {
             model.reloadHistory()
         }
         .onDisappear { model.setMenuPresented(false) }
+        .confirmationDialog(
+            "Cancel this recording?",
+            isPresented: $isConfirmingCancellation,
+            titleVisibility: .visible
+        ) {
+            Button("Cancel and Delete Recording", role: .destructive) {
+                model.cancelRecording()
+            }
+            Button("Keep Recording", role: .cancel) {}
+        } message: {
+            Text("The audio recorded in this session will be permanently deleted and will not be transcribed.")
+        }
     }
 
     private var statusText: String {
         if model.isStarting { return "Starting…" }
+        if model.isCancelling { return "Cancelling recording…" }
         return switch model.phase {
         case .idle: "Idle"
         case .recording: "Recording"
+        case .paused: "Paused"
         case .processing: "Processing recording…"
         case .transcribing: "Transcribing with Deepgram…"
         case .complete: "Complete"
@@ -158,6 +218,7 @@ struct MenuContentView: View {
         return switch model.phase {
         case .idle: .secondary
         case .recording: .red
+        case .paused: .orange
         case .processing, .transcribing: .orange
         case .complete: .green
         case .failed: .red
