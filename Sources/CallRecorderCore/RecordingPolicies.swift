@@ -13,6 +13,7 @@ public enum FinalizationRecoveryPolicy {
             recording.files.audio == nil &&
             (recording.captureStatus == .processing ||
                 (recording.captureStatus == .failed &&
-                    recording.lastFailure?.stage == .finalization))
+                    (recording.lastFailure?.stage == .finalization ||
+                        recording.lastFailure?.stage == .capture)))
     }
 }

@@ -7,55 +7,59 @@ struct HistoryView: View {
     @State private var isDropTargeted = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Image(systemName: "waveform.badge.plus")
-                    .font(.title2)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Transcribe an audio file")
-                        .font(.headline)
-                    Text("Drop audio here or choose a file. The transcript is saved beside it.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+        ZStack {
+            if model.recordings.isEmpty {
+                ContentUnavailableView(
+                    "No Recordings",
+                    systemImage: "waveform",
+                    description: Text("Finished calls and imported transcripts will appear here.")
+                )
+            } else {
+                List(model.recordings) { recording in
+                    RecordingRow(recording: recording, pendingDeletion: $pendingDeletion)
+                        .environmentObject(model)
                 }
-                Spacer()
-                Button("Choose Audio…") { model.chooseAudioForTranscription() }
-                    .disabled(model.isBusy)
-            }
-            .padding(12)
-            .background(isDropTargeted ? Color.accentColor.opacity(0.12) : Color.clear)
-            .dropDestination(for: URL.self) { urls, _ in
-                model.transcribeDroppedAudio(urls)
-            } isTargeted: { targeted in
-                isDropTargeted = targeted
+                .listStyle(.inset)
             }
 
-            Divider()
-
-            Group {
-                if model.recordings.isEmpty {
-                    ContentUnavailableView(
-                        "No Recordings",
-                        systemImage: "waveform",
-                        description: Text("Completed and failed recordings will appear here.")
-                    )
-                } else {
-                    List(model.recordings) { recording in
-                        RecordingRow(recording: recording, pendingDeletion: $pendingDeletion)
-                            .environmentObject(model)
-                    }
-                }
+            if isDropTargeted {
+                ContentUnavailableView(
+                    "Transcribe File",
+                    systemImage: "waveform.badge.plus",
+                    description: Text("Drop the file to queue a transcript beside it.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(.regularMaterial)
+                .allowsHitTesting(false)
             }
         }
         .navigationTitle("Recordings")
+        .frame(minWidth: 620)
         .toolbar {
             Button {
-                model.reloadHistory()
+                model.chooseAudioForTranscription()
             } label: {
-                Label("Refresh", systemImage: "arrow.clockwise")
+                Label("Transcribe File…", systemImage: "waveform.badge.plus")
             }
+            .disabled(!model.canImportAudio)
+        }
+        .dropDestination(for: URL.self) { urls, _ in
+            model.transcribeDroppedAudio(urls)
+        } isTargeted: { targeted in
+            isDropTargeted = targeted && model.canImportAudio
         }
         .onAppear { model.reloadHistory() }
+        .alert(
+            "Unable to complete action",
+            isPresented: Binding(
+                get: { model.historyErrorMessage != nil },
+                set: { if !$0 { model.historyErrorMessage = nil } }
+            )
+        ) {
+            Button("OK") { model.historyErrorMessage = nil }
+        } message: {
+            Text(model.historyErrorMessage ?? "Unknown error")
+        }
         .alert(
             "Delete recording?",
             isPresented: Binding(
@@ -85,72 +89,149 @@ private struct RecordingRow: View {
     @Binding var pendingDeletion: RecordingManifest?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(recording.displayTitle)
-                        .font(.headline)
-                    Text("\(recording.statusText) · \(recording.language.displayName) · \(recording.microphoneName)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                if let duration = recording.durationSeconds {
-                    Text(shortDuration(duration))
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-            }
+        HStack(alignment: .center, spacing: 10) {
+            RecordingStatusSymbol(recording: recording)
+                .frame(width: 18)
 
-            if let failure = recording.lastFailure {
-                Text(failure.message)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(recording.displayTitle)
+                    .font(.headline)
+                    .lineLimit(1)
+                Text("\(recording.statusText) · \(recording.language.displayName)")
                     .font(.caption)
-                    .foregroundStyle(.red)
-                    .lineLimit(2)
-            }
-            ForEach(recording.warnings, id: \.self) { warning in
-                Label(warning, systemImage: "exclamationmark.triangle")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(statusIsFailure ? .red : .secondary)
+                    .lineLimit(1)
             }
 
-            HStack {
-                Button("Reveal Audio") {
-                    model.revealAudio(in: recording)
-                }
-                .disabled(recording.files.audio == nil)
+            Spacer(minLength: 12)
 
-                Button("Reveal Transcript") {
-                    model.revealTranscript(in: recording)
-                }
-                .disabled(
-                    recording.transcriptionStatus != .complete ||
-                        recording.files.transcriptMarkdown == nil
-                )
+            if let duration = recording.durationSeconds {
+                Text(shortDuration(duration))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
 
-                Button("Retry Transcription") {
+            if model.shouldOfferTranscriptionRetry(for: recording),
+               recording.transcriptionStatus == .failed {
+                Button("Retry") {
                     model.retryTranscription(for: recording)
                 }
-                .disabled(model.isBusy || !TranscriptionRetryPolicy.canRetry(recording))
-
-                Button("Recover Recording") {
-                    model.recoverFinalization(for: recording)
+                .disabled(!model.canRetryTranscription(for: recording))
+                .help(retryHelp)
+                .accessibilityHint(retryHelp)
+            } else if recording.files.transcriptMarkdown != nil,
+                      recording.transcriptionStatus == .complete {
+                Button("Show in Finder") {
+                    model.revealTranscript(in: recording)
                 }
-                .disabled(model.isBusy || !FinalizationRecoveryPolicy.canRecover(recording))
-
-                Spacer()
-                Button("Delete", role: .destructive) {
-                    pendingDeletion = recording
+            } else if recording.files.audio != nil {
+                Button("Show in Finder") {
+                    model.revealAudio(in: recording)
                 }
-                .disabled(model.isBusy)
             }
-            .buttonStyle(.borderless)
+
+            if hasMenuActions {
+                Menu {
+                    if recording.files.audio != nil {
+                        Button("Reveal Audio") { model.revealAudio(in: recording) }
+                    }
+                    if recording.transcriptionStatus == .complete,
+                       recording.files.transcriptMarkdown != nil {
+                        Button("Reveal Transcript") { model.revealTranscript(in: recording) }
+                    }
+                    if model.shouldOfferTranscriptionRetry(for: recording) {
+                        Button(retryMenuTitle) {
+                            model.retryTranscription(for: recording)
+                        }
+                        .disabled(!model.canRetryTranscription(for: recording))
+                        .help(retryHelp)
+                    }
+                    if model.canRecoverFinalization(for: recording) {
+                        Button("Finish Saving Audio") {
+                            model.recoverFinalization(for: recording)
+                        }
+                    }
+                    if model.canDelete(recording) {
+                        if hasNonDeleteActions {
+                            Divider()
+                        }
+                        Button("Delete", role: .destructive) {
+                            pendingDeletion = recording
+                        }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .accessibilityLabel("More actions for \(recording.displayTitle)")
+                .help("More actions")
+            }
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, 5)
+        .accessibilityElement(children: .contain)
+    }
+
+    private var statusIsFailure: Bool {
+        recording.lastFailure != nil ||
+            recording.captureStatus == .failed ||
+            recording.transcriptionStatus == .failed
+    }
+
+    private var hasNonDeleteActions: Bool {
+        recording.files.audio != nil ||
+            (recording.transcriptionStatus == .complete &&
+                recording.files.transcriptMarkdown != nil) ||
+            model.shouldOfferTranscriptionRetry(for: recording) ||
+            model.canRecoverFinalization(for: recording)
+    }
+
+    private var hasMenuActions: Bool {
+        hasNonDeleteActions || model.canDelete(recording)
+    }
+
+    private var retryHelp: String {
+        model.transcriptionRetryUnavailableReason ?? "Retry transcription"
+    }
+
+    private var retryMenuTitle: String {
+        guard let reason = model.transcriptionRetryUnavailableReason else {
+            return "Retry Transcription"
+        }
+        return "Retry Transcription — \(reason)"
+    }
+}
+
+private struct RecordingStatusSymbol: View {
+    let recording: RecordingManifest
+
+    var body: some View {
+        if recording.captureStatus == .processing ||
+            recording.transcriptionStatus == .transcribing {
+            ProgressView()
+                .controlSize(.small)
+                .accessibilityLabel(recording.statusText)
+        } else if recording.lastFailure != nil ||
+                    recording.captureStatus == .failed ||
+                    recording.transcriptionStatus == .failed {
+            Image(systemName: "exclamationmark.circle.fill")
+                .foregroundStyle(.red)
+                .accessibilityLabel("Needs attention")
+        } else if recording.transcriptionStatus == .complete {
+            Image(systemName: "checkmark.circle")
+                .accessibilityLabel("Transcript ready")
+        } else {
+            Image(systemName: "clock")
+                .foregroundStyle(.secondary)
+                .accessibilityLabel(recording.statusText)
+        }
     }
 }
 
 private func shortDuration(_ interval: TimeInterval) -> String {
     let seconds = max(0, Int(interval.rounded()))
-    return String(format: "%d:%02d:%02d", seconds / 3_600, (seconds / 60) % 60, seconds % 60)
+    if seconds >= 3_600 {
+        return String(format: "%d:%02d:%02d", seconds / 3_600, (seconds / 60) % 60, seconds % 60)
+    }
+    return String(format: "%d:%02d", seconds / 60, seconds % 60)
 }

@@ -108,6 +108,22 @@ public struct RecordingStore: Sendable {
         return recordings.sorted { $0.createdAt > $1.createdAt }
     }
 
+    public func load(id: UUID) throws -> RecordingManifest {
+        guard let directory = try findRecordingDirectory(id: id) else {
+            throw RecordingStoreError.missingManifest(id)
+        }
+        let manifestURL = directory.appendingPathComponent("manifest.json")
+        if let data = try? Data(contentsOf: manifestURL),
+           let manifest = try? Self.decoder.decode(RecordingManifest.self, from: data),
+           manifest.version == RecordingManifest.currentVersion {
+            return manifest
+        }
+        if let recovery = recoveryManifest(for: directory) {
+            return recovery
+        }
+        throw RecordingStoreError.missingManifest(id)
+    }
+
     @discardableResult
     public func reconcileExternalFiles() throws -> [RecordingManifest] {
         for original in try loadAll() {
@@ -198,26 +214,32 @@ public struct RecordingStore: Sendable {
                 recording.captureStatus = .processing
                 recording.transcriptionStatus = .notStarted
                 recording.lastFailure = RecordingFailure(
-                    stage: .capture,
+                    stage: .finalization,
                     message: "The app exited while recording. Closed capture chunks will be recovered.",
                     occurredAt: now
                 )
                 try save(recording)
                 recordings[index] = recording
             } else if recording.captureStatus == .processing {
-                recording.lastFailure = RecordingFailure(
-                    stage: .finalization,
-                    message: "The app exited before recording finalization completed. Recovery will resume.",
-                    occurredAt: now
-                )
+                if recording.lastFailure?.stage == .capture {
+                    let warning = "Finalization was interrupted and will resume."
+                    if !recording.warnings.contains(warning) {
+                        recording.warnings.append(warning)
+                    }
+                } else {
+                    recording.lastFailure = RecordingFailure(
+                        stage: .finalization,
+                        message: "The app exited before recording finalization completed. Recovery will resume.",
+                        occurredAt: now
+                    )
+                }
                 try save(recording)
                 recordings[index] = recording
             } else if recording.transcriptionStatus == .transcribing {
-                recording.transcriptionStatus = .failed
-                recording.lastFailure = RecordingFailure(
-                    stage: .transcription,
-                    message: "Transcription was interrupted. The finalized audio was preserved and can be retried.",
-                    occurredAt: now
+                recording.transcriptionStatus = .notStarted
+                recording.lastFailure = nil
+                recording.warnings.append(
+                    "Transcription was interrupted and queued to resume."
                 )
                 try save(recording)
                 recordings[index] = recording

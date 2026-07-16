@@ -94,6 +94,11 @@ public struct TranscriptionService: Sendable {
             recording.lastFailure = nil
             try store.save(recording)
             return recording
+        } catch is CancellationError {
+            recording.transcriptionStatus = .notStarted
+            recording.lastFailure = nil
+            try store.save(recording)
+            throw CancellationError()
         } catch {
             let transcriptionError = error
             recording.transcriptionStatus = .failed

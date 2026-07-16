@@ -230,73 +230,61 @@ public struct RecordingManifest: Codable, Equatable, Identifiable, Sendable {
 
     public var statusText: String {
         if captureStatus == .recording { return "Recording" }
-        if captureStatus == .processing { return "Processing" }
+        if captureStatus == .processing { return "Finishing audio" }
         if captureStatus == .failed { return "Capture failed" }
         switch transcriptionStatus {
-        case .notStarted: return "Ready"
+        case .notStarted: return "Waiting to transcribe"
         case .waitingForCredential: return "Needs Deepgram key"
         case .transcribing: return "Transcribing"
-        case .complete: return "Complete"
+        case .complete: return "Transcript ready"
         case .failed: return "Transcription failed"
         }
     }
 }
 
-public enum RecorderPhase: String, Sendable {
-    case idle
+public enum CaptureSessionState: String, Sendable {
+    case ready
+    case starting
     case recording
     case paused
-    case processing
-    case transcribing
-    case complete
-    case failed
+    case stopping
 }
 
-public enum RecorderEvent: Equatable, Sendable {
-    case start
+public enum CaptureSessionEvent: Equatable, Sendable {
+    case startRequested
+    case captureStarted
     case pause
     case resume
-    case stop
-    case cancel
-    case finalized(transcriptionRequired: Bool)
-    case transcriptionSucceeded
-    case retryTranscription
-    case recoverFinalization
-    case fail
-    case reset
+    case stopRequested
+    case stopped
+    case startFailed
 }
 
-public enum RecorderStateError: Error, Equatable, Sendable {
-    case invalidTransition(from: RecorderPhase, event: RecorderEvent)
+public enum CaptureSessionStateError: Error, Equatable, Sendable {
+    case invalidTransition(from: CaptureSessionState, event: CaptureSessionEvent)
 }
 
-public struct RecorderStateMachine: Sendable {
-    public private(set) var phase: RecorderPhase
+public struct CaptureSessionStateMachine: Sendable {
+    public private(set) var state: CaptureSessionState
 
-    public init(phase: RecorderPhase = .idle) {
-        self.phase = phase
+    public init(state: CaptureSessionState = .ready) {
+        self.state = state
     }
 
-    public mutating func transition(_ event: RecorderEvent) throws {
-        let next: RecorderPhase? = switch (phase, event) {
-        case (.idle, .start), (.complete, .start), (.failed, .start): .recording
+    public mutating func transition(_ event: CaptureSessionEvent) throws {
+        let next: CaptureSessionState? = switch (state, event) {
+        case (.ready, .startRequested): .starting
+        case (.starting, .captureStarted): .recording
+        case (.starting, .startFailed): .ready
         case (.recording, .pause): .paused
         case (.paused, .resume): .recording
-        case (.recording, .stop), (.paused, .stop): .processing
-        case (.recording, .cancel), (.paused, .cancel): .idle
-        case (.processing, .finalized(let required)): required ? .transcribing : .complete
-        case (.transcribing, .transcriptionSucceeded): .complete
-        case (.idle, .retryTranscription), (.complete, .retryTranscription),
-             (.failed, .retryTranscription): .transcribing
-        case (.idle, .recoverFinalization), (.complete, .recoverFinalization),
-             (.failed, .recoverFinalization): .processing
-        case (_, .fail): .failed
-        case (.complete, .reset), (.failed, .reset): .idle
+        case (.recording, .stopRequested), (.paused, .stopRequested): .stopping
+        case (.stopping, .stopped): .ready
         default: nil
         }
         guard let next else {
-            throw RecorderStateError.invalidTransition(from: phase, event: event)
+            throw CaptureSessionStateError.invalidTransition(from: state, event: event)
         }
-        phase = next
+        state = next
     }
 }

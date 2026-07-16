@@ -55,8 +55,61 @@ func runRecordingStoreTests() throws {
                 now: Date(timeIntervalSince1970: 500)
             )
             try expectEqual(recovered.first?.captureStatus, .processing)
-            try expectEqual(recovered.first?.lastFailure?.stage, .capture)
+            try expectEqual(recovered.first?.lastFailure?.stage, .finalization)
             try expect(FileManager.default.fileExists(atPath: chunk.path))
+        }
+    }
+
+    try runTest("interrupted transcription is queued to resume") {
+        try withTemporaryDirectory { root in
+            let store = RecordingStore(rootDirectory: root)
+            var recording = try store.createRecording(
+                language: .english,
+                microphoneUID: "mic",
+                microphoneName: "Mic"
+            )
+            recording.captureStatus = .complete
+            recording.transcriptionStatus = .transcribing
+            try store.save(recording)
+
+            let recovered = try store.recoverInterruptedRecordings()
+
+            try expectEqual(recovered.first?.transcriptionStatus, .notStarted)
+            try expect(recovered.first?.lastFailure == nil)
+            try expectEqual(
+                recovered.first?.warnings,
+                ["Transcription was interrupted and queued to resume."]
+            )
+        }
+    }
+
+    try runTest("recovery preserves a capture failure while resuming finalization") {
+        try withTemporaryDirectory { root in
+            let store = RecordingStore(rootDirectory: root)
+            var recording = try store.createRecording(
+                language: .english,
+                microphoneUID: "mic",
+                microphoneName: "Mic"
+            )
+            recording.captureStatus = .processing
+            recording.lastFailure = RecordingFailure(
+                stage: .capture,
+                message: "The output device changed during recording."
+            )
+            try store.save(recording)
+
+            let recovered = try require(try store.recoverInterruptedRecordings().first)
+
+            try expectEqual(recovered.captureStatus, .processing)
+            try expectEqual(recovered.lastFailure?.stage, .capture)
+            try expectEqual(
+                recovered.lastFailure?.message,
+                "The output device changed during recording."
+            )
+            try expectEqual(
+                recovered.warnings,
+                ["Finalization was interrupted and will resume."]
+            )
         }
     }
 

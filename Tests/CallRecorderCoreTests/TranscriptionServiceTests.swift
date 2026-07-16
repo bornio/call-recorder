@@ -135,6 +135,48 @@ func runTranscriptionServiceTests() async throws {
         }
     }
 
+    try await runAsyncTest("cancelled transcription is requeued without a failure") {
+        try await withTranscriptionTemporaryDirectory { root in
+            let client = DeepgramClient { _, _ in
+                throw URLError(.cancelled)
+            }
+            let store = RecordingStore(rootDirectory: root.appendingPathComponent("history"))
+            var recording = try store.createRecording(
+                language: .english,
+                microphoneUID: "mic",
+                microphoneName: "Mic"
+            )
+            let publicDirectory = root.appendingPathComponent("Call")
+            try FileManager.default.createDirectory(
+                at: publicDirectory,
+                withIntermediateDirectories: true
+            )
+            let audioURL = publicDirectory.appendingPathComponent("Audio.m4a")
+            try Data([0, 1, 2, 3]).write(to: audioURL)
+            recording.captureStatus = .complete
+            recording.files.exportDirectory = publicDirectory.path
+            recording.files.audio = audioURL.path
+            recording.files.audioBookmark = try store.bookmark(for: audioURL)
+            recording.files.transcriptMarkdown = publicDirectory
+                .appendingPathComponent("Transcript.md").path
+            try store.save(recording)
+
+            do {
+                _ = try await TranscriptionService(client: client).transcribe(
+                    recording: recording,
+                    store: store,
+                    apiKey: "test-key"
+                )
+                throw TestFailure(description: "Expected transcription cancellation")
+            } catch is CancellationError {
+                let queued = try require(try store.loadAll().first)
+                try expectEqual(queued.transcriptionStatus, .notStarted)
+                try expect(queued.lastFailure == nil)
+                try expect(FileManager.default.fileExists(atPath: audioURL.path))
+            }
+        }
+    }
+
     try await runAsyncTest("imported transcription does not overwrite an existing Markdown file") {
         try await withTranscriptionTemporaryDirectory { root in
             let response = Data(

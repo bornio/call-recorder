@@ -108,6 +108,7 @@ public struct DeepgramClient: Sendable {
         apiKey: String,
         keyterms: [String] = []
     ) async throws -> Data {
+        try Task.checkCancellation()
         guard FileManager.default.isReadableFile(atPath: audioURL.path) else {
             throw DeepgramError.unreadableAudio
         }
@@ -121,9 +122,14 @@ public struct DeepgramClient: Sendable {
         let response: URLResponse
         do {
             (data, response) = try await upload(request, audioURL)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
         } catch {
             throw DeepgramError.transport(error.localizedDescription)
         }
+        try Task.checkCancellation()
         guard let httpResponse = response as? HTTPURLResponse else {
             throw DeepgramError.invalidResponse
         }

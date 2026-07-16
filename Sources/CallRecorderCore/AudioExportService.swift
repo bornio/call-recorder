@@ -123,12 +123,14 @@ public struct AudioExportService: Sendable {
 
     public func publicationDirectory(
         for recording: RecordingManifest,
-        in root: URL
+        in root: URL,
+        reservedPaths: Set<String> = []
     ) -> URL {
         availableDestination(
             in: root,
             startedAt: recording.effectiveStartedAt,
-            timeZoneIdentifier: recording.timeZoneIdentifier
+            timeZoneIdentifier: recording.timeZoneIdentifier,
+            reservedPaths: reservedPaths
         )
     }
 
@@ -186,7 +188,8 @@ public struct AudioExportService: Sendable {
     private func availableDestination(
         in root: URL,
         startedAt: Date,
-        timeZoneIdentifier: String?
+        timeZoneIdentifier: String?,
+        reservedPaths: Set<String>
     ) -> URL {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -198,7 +201,8 @@ public struct AudioExportService: Sendable {
         while true {
             let name = suffix == 1 ? baseName : "\(baseName) (\(suffix))"
             let candidate = root.appendingPathComponent(name, isDirectory: true)
-            if !FileManager.default.fileExists(atPath: candidate.path) {
+            if !reservedPaths.contains(candidate.standardizedFileURL.path),
+               !FileManager.default.fileExists(atPath: candidate.path) {
                 return candidate
             }
             suffix += 1

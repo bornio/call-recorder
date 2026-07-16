@@ -16,21 +16,21 @@ struct SettingsView: View {
                         Text(microphone.name).tag(microphone.uid)
                     }
                 }
-                .disabled(model.isBusy)
+                .disabled(!model.canChangeCaptureConfiguration)
 
                 Picker("Transcription language", selection: $model.language) {
                     ForEach(RecordingLanguage.allCases) { language in
                         Text(language.displayName).tag(language)
                     }
                 }
-                .disabled(model.isBusy)
+                .disabled(!model.canChangeCaptureConfiguration)
 
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Your transcript name")
                     TextField("Enter your name", text: $model.localSpeakerName)
                         .textFieldStyle(.roundedBorder)
                         .accessibilityLabel("Your transcript name")
-                        .disabled(model.isBusy)
+                        .disabled(!model.canChangeCaptureConfiguration)
                         .onSubmit { model.normalizeLocalSpeakerName() }
                     Text("Type the name that should label your microphone channel.")
                         .font(.caption)
@@ -43,7 +43,7 @@ struct SettingsView: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                         Button("Choose…") { model.chooseOutputDirectory() }
-                            .disabled(model.isBusy)
+                            .disabled(!model.canChangeCaptureConfiguration)
                     }
                 }
                 Text("Each finished call becomes one clean folder with Audio.m4a and, when transcription succeeds, Transcript.md. Temporary recovery files stay private and are removed after the compressed audio is validated.")
@@ -87,8 +87,6 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            .disabled(model.isBusy)
-
             Section("Deepgram") {
                 HStack {
                     Image(systemName: model.hasDeepgramKey ? "checkmark.circle.fill" : "circle")
@@ -124,7 +122,7 @@ struct SettingsView: View {
                 }
             }
 
-            if let error = model.errorMessage {
+            if let error = model.settingsErrorMessage {
                 Section {
                     Text(error)
                         .foregroundStyle(.red)

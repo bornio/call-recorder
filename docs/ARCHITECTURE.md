@@ -48,7 +48,7 @@ There is no Deepgram client reference in the capture bridge. The app cannot begi
 4. `Audio.m4a` has been encoded, reopened, and validated; and
 5. the manifest reports complete capture.
 
-The Keychain value is loaded only at this post-call boundary. An upload error stores a safe error message, keeps the published M4A, and enables the history retry action. Starting, importing, or retrying any upload is disabled while recording.
+The Keychain value is loaded only at this post-call boundary. An upload error stores a safe error message, keeps the published M4A, and enables the history retry action. Starting, importing, or retrying any new upload is disabled while recording. A request already running for an earlier call is allowed to finish; capture neither waits for nor cancels it.
 
 ## Failure handling
 

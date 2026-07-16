@@ -60,13 +60,14 @@ func require<T>(_ value: T?) throws -> T {
 struct CallRecorderTestRunner {
     static func main() async {
         do {
-            try runRecorderStateMachineTests()
+            try runCaptureSessionStateMachineTests()
             try runAudioDeviceSelectionTests()
             try runRecordingStoreTests()
             try runDeepgramAndTranscriptTests()
             try runRecordingFinalizerTests()
             try runAudioExportServiceTests()
             try await runTranscriptionServiceTests()
+            try await runRecordingJobQueueTests()
             print("\n\(completedTestCount.value) tests passed")
         } catch {
             FileHandle.standardError.write(Data("\(error)\n".utf8))

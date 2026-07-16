@@ -49,6 +49,10 @@ utterances, multichannel handling, and the currently supported diarization
 parameter. Validate the exact current API options against official Deepgram
 documentation during implementation.
 
+Do not start a new request while capture is active. If a request for an earlier
+call is already running, let it finish; never delay capture or cancel and repeat
+the request solely because a new recording starts.
+
 Use a stable request tag for usage reporting and a one-second utterance split.
 Allow optional Nova-3 keyterm prompting for names and jargon, but keep it off by
 default and clearly identify it as a separately billed Deepgram add-on. Mark
@@ -70,7 +74,8 @@ process arguments, fixtures, or test snapshots.
 
 ## Performance and safety
 
-- No transcription or uploads while recording.
+- No new transcription or upload request begins while recording; a request
+  already running for an earlier call may finish.
 - No audio encoding, JSON work, logging, UI updates, locks, or allocation in the
   Core Audio callback.
 - A bounded, observable buffer sits between capture and file writing.

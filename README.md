@@ -5,8 +5,6 @@ microphone locally, then transcribes the recording after you stop. It does not
 change the audio devices used by Zoom, Meet, Teams, FaceTime, Slack, or other
 call apps.
 
-![Call Recorder menu](docs/call-recorder.png)
-
 ## Install a release
 
 Download an Apple silicon DMG from
@@ -75,10 +73,12 @@ recording is legal in your jurisdiction.
    input. Optionally enable paid keyterm prompting for names and jargon.
 4. Choose **Start Recording** and grant Microphone and System Audio Recording
    access when macOS asks.
-5. Pause and resume as needed, then choose **Stop Recording**. Paused intervals
-   are omitted from the saved audio. The app finalizes the local audio before
-   starting the Deepgram request. **Cancel Recording…** permanently discards the
-   current session after confirmation.
+5. Pause and resume as needed, then choose **Stop & Save**. Paused intervals
+   are omitted from the saved audio. As soon as the local capture has been
+   handed off safely, the controls return to **Ready** so you can start a
+   back-to-back call while the previous recording finishes in the background.
+   **Discard Recording…** permanently discards the current session after
+   confirmation.
 
 If access was previously denied, use the permission buttons in Settings, grant
 access in System Settings, then quit and reopen Call Recorder.
@@ -113,7 +113,19 @@ If finalization or transcription fails, the retained recording appears in
 the local audio. Quitting or sleeping during capture preserves completed chunks
 without starting a network request.
 
-You can also choose **Transcribe Audio…** or drop an existing audio file into
+If you quit while capture is active, the app asks whether to **Stop & Quit** or
+keep recording. Stop & Quit secures the local capture before the app exits. If
+a transcription is already running, normal Quit waits for it to finish so the
+same audio is not automatically submitted again on the next launch.
+
+Finished calls are handled one at a time in capture order. Local audio may
+finish assembling during the next call. The app does not start a new Deepgram
+request while recording, but a request already running for an earlier call may
+finish in the background. Starting a recording never waits for or cancels that
+request. Interrupted transcription resumes automatically after capture ends or
+the app is relaunched.
+
+You can also choose **Transcribe File…** or drop an existing audio file into
 the Recordings window. The app writes Markdown beside the source without
 overwriting an existing file and never takes ownership of imported audio.
 
@@ -123,7 +135,8 @@ overwriting an existing file and never takes ownership of imported audio.
   visibly indicated.
 - Pausing stops both audio tracks until you resume; cancelling deletes the
   in-progress local session without transcribing it.
-- No transcription or network activity occurs while recording.
+- The current call stays local until it stops. No new Deepgram request starts
+  while recording; a request already running for an earlier call may finish.
 - Deepgram requests use Nova-3 and opt the submitted audio out of model
   improvement.
 - Custom key terms are sent only when the separately billed option is enabled.

@@ -18,8 +18,9 @@ audio devices or interfering with their calls.
   Never set the private aggregate device as the system default device.
 - Capture the selected microphone separately and preserve alignment with the
   system-audio track.
-- During a call, do no transcription and no network activity. The capture path
-  only records locally.
+- During a call, the capture path only records locally and no new transcription
+  request may begin. A Deepgram request already running for an earlier call may
+  finish; starting capture must never wait for or cancel it.
 - After Stop, convert/finalize the recording and submit it to Deepgram's
   prerecorded API using Nova-3.
 - Store the Deepgram API key in macOS Keychain. Never commit, log, display, or

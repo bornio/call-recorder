@@ -4,6 +4,31 @@ import Foundation
 @testable import CallRecorderCore
 
 func runAudioExportServiceTests() throws {
+    try runTest("publication destinations respect paths reserved by queued recordings") {
+        let service = AudioExportService()
+        let root = URL(fileURLWithPath: "/tmp/call-recorder-output", isDirectory: true)
+        var first = RecordingManifest(
+            createdAt: Date(timeIntervalSince1970: 1_752_654_600),
+            language: .english,
+            microphoneUID: "mic",
+            microphoneName: "Mic"
+        )
+        first.captureStartedAt = first.createdAt
+        first.timeZoneIdentifier = "UTC"
+        let firstPath = service.publicationDirectory(for: first, in: root)
+
+        var second = first
+        second.id = UUID()
+        let secondPath = service.publicationDirectory(
+            for: second,
+            in: root,
+            reservedPaths: [firstPath.path]
+        )
+
+        try expectEqual(secondPath.lastPathComponent, "2025-07-16 08-30 — Call (2)")
+        try expect(firstPath != secondPath)
+    }
+
     try runTest("a finalized WAV publishes as a compact validated stereo M4A") {
         try withAudioExportTemporaryDirectory { root in
             let waveURL = root.appendingPathComponent("audio.wav")
