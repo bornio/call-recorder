@@ -68,16 +68,14 @@ struct MenuContentView: View {
             }
 
             Divider()
-            HStack {
+            HStack(spacing: 12) {
                 Button("Recordings") { showRecordings() }
                     .buttonStyle(.plain)
-                Spacer()
                 SettingsLink {
-                    Image(systemName: "gearshape")
+                    Text("Settings")
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Settings")
-                .help("Settings")
+                Spacer()
                 Button("Quit") { NSApplication.shared.terminate(nil) }
                     .buttonStyle(.plain)
             }

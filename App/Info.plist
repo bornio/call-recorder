@@ -19,11 +19,11 @@
     <key>CFBundleShortVersionString</key>
     <string>0.2.0</string>
     <key>CFBundleVersion</key>
-    <string>2</string>
+    <string>3</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.2</string>
     <key>LSUIElement</key>
-    <false/>
+    <true/>
     <key>NSAudioCaptureUsageDescription</key>
     <string>Call Recorder captures system audio only after you explicitly start a recording.</string>
     <key>NSMicrophoneUsageDescription</key>

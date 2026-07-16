@@ -132,8 +132,6 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .padding()
         .onAppear {
-            NSApplication.shared.setActivationPolicy(.regular)
-            NSApplication.shared.activate(ignoringOtherApps: true)
             model.refreshMicrophones()
             model.refreshCredentialStatus()
         }
