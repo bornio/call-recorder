@@ -322,6 +322,10 @@ func runDeepgramAndTranscriptTests() throws {
         try expect(!TranscriptionRetryPolicy.canRetry(recording))
         recording.files.audio = "audio.wav"
         try expect(TranscriptionRetryPolicy.canRetry(recording))
+        recording.transcriptionStatus = .notStarted
+        try expect(!TranscriptionRetryPolicy.canRetry(recording))
+        recording.transcriptionStatus = .waitingForCredential
+        try expect(!TranscriptionRetryPolicy.canRetry(recording))
         recording.transcriptionStatus = .complete
         try expect(!TranscriptionRetryPolicy.canRetry(recording))
     }

@@ -65,7 +65,8 @@ func runAudioExportServiceTests() throws {
             try expect(abs(published.durationSeconds - 2) < 0.05)
             let publicFiles = try FileManager.default.contentsOfDirectory(
                 at: published.directoryURL,
-                includingPropertiesForKeys: nil
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
             )
             try expectEqual(publicFiles.map(\.lastPathComponent), ["Audio.m4a"])
             let compressed = try AVAudioFile(forReading: published.audioURL)
@@ -79,10 +80,25 @@ func runAudioExportServiceTests() throws {
             try expect(compressedSize < waveSize)
 
             let recovered = try AudioExportService().recoverPublication(
-                in: published.directoryURL
+                in: published.directoryURL,
+                recordingID: recording.id
             )
             try expectEqual(recovered.audioURL, published.audioURL)
             try expect(abs(recovered.durationSeconds - published.durationSeconds) < 0.001)
+            try expect(AudioExportService.publicationBelongs(
+                in: published.directoryURL,
+                to: recording.id
+            ))
+            try expect(!AudioExportService.publicationBelongs(
+                in: published.directoryURL,
+                to: UUID()
+            ))
+            try expectThrows {
+                try AudioExportService().recoverPublication(
+                    in: published.directoryURL,
+                    recordingID: UUID()
+                )
+            }
 
             var interrupted = recording
             interrupted.captureStatus = .processing
@@ -101,6 +117,76 @@ func runAudioExportServiceTests() throws {
                 exportRoot: exportRoot
             )
             try expect(collision.directoryURL.lastPathComponent.hasSuffix("(2)"))
+        }
+    }
+
+    try runTest("unrelated audio is never accepted as an interrupted publication") {
+        try withAudioExportTemporaryDirectory { root in
+            let destination = root.appendingPathComponent("Call", isDirectory: true)
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            try Data([1, 2, 3]).write(to: destination.appendingPathComponent("Audio.m4a"))
+            var recording = RecordingManifest(
+                language: .english,
+                microphoneUID: "mic",
+                microphoneName: "Mic"
+            )
+            recording.captureStatus = .processing
+            recording.files.exportDirectory = destination.path
+
+            try expectThrows {
+                try RecordingPostProcessor().process(
+                    recording: recording,
+                    store: RecordingStore(rootDirectory: root.appendingPathComponent("history"))
+                )
+            }
+            try expect(
+                FileManager.default.fileExists(
+                    atPath: destination.appendingPathComponent("Audio.m4a").path
+                )
+            )
+        }
+    }
+
+    try runTest("stale publication cleanup removes only exact partial artifacts") {
+        try withAudioExportTemporaryDirectory { root in
+            let staging = root.appendingPathComponent(
+                ".call-recorder-\(UUID().uuidString).partial",
+                isDirectory: true
+            )
+            let transcriptPartial = root.appendingPathComponent(
+                ".call-recorder-Transcript.md.\(UUID().uuidString).partial"
+            )
+            let unrelated = root.appendingPathComponent("notes.partial")
+            let genericMarkdownPartial = root.appendingPathComponent(
+                ".Transcript.md.\(UUID().uuidString).partial"
+            )
+            let fresh = root.appendingPathComponent(
+                ".call-recorder-\(UUID().uuidString).partial",
+                isDirectory: true
+            )
+            try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: fresh, withIntermediateDirectories: true)
+            try Data([1]).write(to: transcriptPartial)
+            try Data([2]).write(to: unrelated)
+            try Data([3]).write(to: genericMarkdownPartial)
+            let oldDate = Date(timeIntervalSince1970: 100)
+            for url in [staging, transcriptPartial, unrelated, genericMarkdownPartial] {
+                try FileManager.default.setAttributes(
+                    [.modificationDate: oldDate],
+                    ofItemAtPath: url.path
+                )
+            }
+
+            try AudioExportService.cleanupStaleArtifacts(
+                in: root,
+                olderThan: Date(timeIntervalSince1970: 200)
+            )
+
+            try expect(!FileManager.default.fileExists(atPath: staging.path))
+            try expect(!FileManager.default.fileExists(atPath: transcriptPartial.path))
+            try expect(FileManager.default.fileExists(atPath: unrelated.path))
+            try expect(FileManager.default.fileExists(atPath: genericMarkdownPartial.path))
+            try expect(FileManager.default.fileExists(atPath: fresh.path))
         }
     }
 }

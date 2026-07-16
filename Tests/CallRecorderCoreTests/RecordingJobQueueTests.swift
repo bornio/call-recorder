@@ -33,6 +33,46 @@ func runRecordingJobQueueTests() async throws {
         }
     }
 
+    try await runAsyncTest("local transcript recovery never asks for a Deepgram key") {
+        try await withQueueTemporaryDirectory { root in
+            let store = RecordingStore(rootDirectory: root.appendingPathComponent("history"))
+            let recording = try queuedTranscriptionRecording(in: store, root: root)
+            let response = Data(
+                "{\"results\":{\"channels\":[{\"alternatives\":[{\"transcript\":\"Hi\",\"words\":[]}]}]}}".utf8
+            )
+            try response.write(
+                to: try store.directory(for: recording).appendingPathComponent("transcript.json")
+            )
+            let providerCalls = SynchronousCounter()
+            let completed = AsyncSignal()
+            let queue = await RecordingJobQueue(
+                store: store,
+                apiKeyProvider: {
+                    providerCalls.increment()
+                    return nil
+                },
+                finalize: { _, _ in
+                    throw TestFailure(description: "Unexpected finalization")
+                },
+                transcribe: { original, store, apiKey in
+                    try expectEqual(apiKey, "")
+                    var updated = try store.load(id: original.id)
+                    updated.transcriptionStatus = .complete
+                    try store.save(updated)
+                    await completed.signal()
+                    return updated
+                }
+            )
+
+            await queue.start()
+            await completed.wait()
+
+            try expectEqual(providerCalls.value, 0)
+            try expectEqual(try store.load(id: recording.id).transcriptionStatus, .complete)
+            await queue.shutdownImmediately()
+        }
+    }
+
     try await runAsyncTest("active transcription finishes during capture while new work waits") {
         try await withQueueTemporaryDirectory { root in
             let store = RecordingStore(rootDirectory: root)
@@ -227,6 +267,7 @@ func runRecordingJobQueueTests() async throws {
             )
             let chunk = try store.url(for: "capture/system/closed.caf", in: recording)
             try Data([1, 2, 3]).write(to: chunk)
+            try writeQueueClosedCapture(for: recording, store: store)
             _ = try store.recoverInterruptedRecordings()
 
             let output = root.appendingPathComponent("Recovered Call", isDirectory: true)
@@ -385,7 +426,10 @@ func runRecordingJobQueueTests() async throws {
             try expectEqual(partial.captureStatus, .failed)
             try expectEqual(partial.lastFailure?.stage, .capture)
             try expect(partial.files.audio == nil)
-            try expect(FinalizationRecoveryPolicy.canRecover(partial))
+            try expect(FinalizationRecoveryPolicy.canRecover(
+                partial,
+                hasRecoverableCapture: true
+            ))
             try expect(
                 partial.warnings.contains { $0.hasPrefix("Audio finalization failed:") }
             )
@@ -448,6 +492,19 @@ private actor AsyncCounter {
     }
 }
 
+private final class SynchronousCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var value: Int {
+        lock.withLock { count }
+    }
+
+    func increment() {
+        lock.withLock { count += 1 }
+    }
+}
+
 private func queuedTranscriptionRecording(
     in store: RecordingStore,
     root: URL,
@@ -469,6 +526,24 @@ private func queuedTranscriptionRecording(
     recording.files.transcriptMarkdown = output.appendingPathComponent("Transcript.md").path
     try store.save(recording)
     return recording
+}
+
+private func writeQueueClosedCapture(
+    for recording: RecordingManifest,
+    store: RecordingStore
+) throws {
+    let metadata = Data(
+        "{\"file\":\"closed.caf\",\"firstHostTime\":1,\"lastHostTime\":1,\"lastFrames\":1,\"frames\":1,\"sampleRate\":48000}\n".utf8
+    )
+    for source in ["system", "microphone"] {
+        try metadata.write(
+            to: try store.url(for: "capture/\(source)/chunks.jsonl", in: recording)
+        )
+        let chunk = try store.url(for: "capture/\(source)/closed.caf", in: recording)
+        if !FileManager.default.fileExists(atPath: chunk.path) {
+            try Data([1]).write(to: chunk)
+        }
+    }
 }
 
 private func withQueueTemporaryDirectory(

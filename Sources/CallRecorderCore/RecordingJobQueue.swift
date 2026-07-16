@@ -193,28 +193,32 @@ public final class RecordingJobQueue {
     private func transcribe(_ original: RecordingManifest) async {
         guard !captureBlocksNewWork else { return }
         let apiKey: String
-        do {
-            guard let resolved = try apiKeyProvider(), !resolved.isEmpty else {
-                var recording = try store.load(id: original.id)
-                recording.transcriptionStatus = .waitingForCredential
-                if recording.lastFailure?.stage == .transcription {
-                    recording.lastFailure = nil
+        if store.expectsRetainedTranscriptResponse(for: original) {
+            apiKey = ""
+        } else {
+            do {
+                guard let resolved = try apiKeyProvider(), !resolved.isEmpty else {
+                    var recording = try store.load(id: original.id)
+                    recording.transcriptionStatus = .waitingForCredential
+                    if recording.lastFailure?.stage == .transcription {
+                        recording.lastFailure = nil
+                    }
+                    try store.save(recording)
+                    onChange?(activity)
+                    return
                 }
-                try store.save(recording)
+                apiKey = resolved
+            } catch {
+                guard var recording = try? store.load(id: original.id) else { return }
+                recording.transcriptionStatus = .failed
+                recording.lastFailure = RecordingFailure(
+                    stage: .transcription,
+                    message: error.localizedDescription
+                )
+                try? store.save(recording)
                 onChange?(activity)
                 return
             }
-            apiKey = resolved
-        } catch {
-            guard var recording = try? store.load(id: original.id) else { return }
-            recording.transcriptionStatus = .failed
-            recording.lastFailure = RecordingFailure(
-                stage: .transcription,
-                message: error.localizedDescription
-            )
-            try? store.save(recording)
-            onChange?(activity)
-            return
         }
 
         guard !captureBlocksNewWork else { return }

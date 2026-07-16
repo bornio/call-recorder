@@ -4,19 +4,33 @@ import SwiftUI
 struct HistoryView: View {
     @EnvironmentObject private var model: AppModel
     @State private var pendingDeletion: RecordingManifest?
+    @State private var pendingReupload: RecordingManifest?
     @State private var isDropTargeted = false
 
     var body: some View {
         ZStack {
             if model.recordings.isEmpty {
-                ContentUnavailableView(
-                    "No Recordings",
-                    systemImage: "waveform",
-                    description: Text("Finished calls and imported transcripts will appear here.")
-                )
+                ContentUnavailableView {
+                    Label("No Recordings", systemImage: "waveform")
+                } description: {
+                    Text("Finished calls and imported transcripts will appear here.")
+                } actions: {
+                    Button {
+                        model.chooseAudioForTranscription()
+                    } label: {
+                        Label("Transcribe Audio…", systemImage: "waveform.badge.plus")
+                    }
+                    .disabled(!model.canImportAudio)
+                    .help(model.importUnavailableReason ?? "Transcribe an audio file")
+                    .accessibilityHint(model.importUnavailableReason ?? "Choose an audio file to transcribe")
+                }
             } else {
                 List(model.recordings) { recording in
-                    RecordingRow(recording: recording, pendingDeletion: $pendingDeletion)
+                    RecordingRow(
+                        recording: recording,
+                        pendingDeletion: $pendingDeletion,
+                        pendingReupload: $pendingReupload
+                    )
                         .environmentObject(model)
                 }
                 .listStyle(.inset)
@@ -39,16 +53,26 @@ struct HistoryView: View {
             Button {
                 model.chooseAudioForTranscription()
             } label: {
-                Label("Transcribe File…", systemImage: "waveform.badge.plus")
+                if model.isImportingAudio {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Preparing audio…")
+                    }
+                } else {
+                    Label("Transcribe Audio…", systemImage: "waveform.badge.plus")
+                }
             }
             .disabled(!model.canImportAudio)
+            .help(model.importUnavailableReason ?? "Transcribe an audio file")
+            .accessibilityHint(model.importUnavailableReason ?? "Choose an audio file to transcribe")
         }
         .dropDestination(for: URL.self) { urls, _ in
             model.transcribeDroppedAudio(urls)
         } isTargeted: { targeted in
             isDropTargeted = targeted && model.canImportAudio
         }
-        .onAppear { model.reloadHistory() }
+        .onAppear { model.refreshHistoryFromFinder() }
         .alert(
             "Unable to complete action",
             isPresented: Binding(
@@ -75,10 +99,26 @@ struct HistoryView: View {
             Button("Cancel", role: .cancel) { pendingDeletion = nil }
         } message: { recording in
             if recording.effectiveOrigin == .importedAudio {
-                Text("This removes the item from app history. The source audio and transcript remain in Finder.")
+                Text("This removes the item from app history. Any source audio or transcript files remain in Finder.")
             } else {
-                Text("This permanently removes the app-created Audio.m4a and Transcript.md files.")
+                Text("This removes app history and permanently deletes Finder files only when Call Recorder can verify that it created them.")
             }
+        }
+        .alert(
+            "Upload audio to Deepgram again?",
+            isPresented: Binding(
+                get: { pendingReupload != nil },
+                set: { if !$0 { pendingReupload = nil } }
+            ),
+            presenting: pendingReupload
+        ) { recording in
+            Button("Upload Again", role: .destructive) {
+                model.reuploadTranscription(for: recording)
+                pendingReupload = nil
+            }
+            Button("Cancel", role: .cancel) { pendingReupload = nil }
+        } message: { _ in
+            Text("This starts a new paid Deepgram request. The prior request may already have been billed.")
         }
     }
 }
@@ -87,6 +127,7 @@ private struct RecordingRow: View {
     @EnvironmentObject private var model: AppModel
     let recording: RecordingManifest
     @Binding var pendingDeletion: RecordingManifest?
+    @Binding var pendingReupload: RecordingManifest?
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -101,6 +142,23 @@ private struct RecordingRow: View {
                     .font(.caption)
                     .foregroundStyle(statusIsFailure ? .red : .secondary)
                     .lineLimit(1)
+                if let failure = recording.lastFailure {
+                    Text(failure.message)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                        .help(failure.message)
+                }
+                let recoveryBytes = model.recoveryBytes(for: recording)
+                if recoveryBytes > 0 {
+                    Label(
+                        "\(ByteCountFormatter.string(fromByteCount: recoveryBytes, countStyle: .file)) recovery audio retained",
+                        systemImage: "internaldrive"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .help("Private recovery audio is retained until saving succeeds or this history item is deleted.")
+                }
             }
 
             Spacer(minLength: 12)
@@ -109,23 +167,43 @@ private struct RecordingRow: View {
                 Text(shortDuration(duration))
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
+                    .accessibilityLabel("Duration")
+                    .accessibilityValue(accessibleDuration(duration))
             }
 
-            if model.shouldOfferTranscriptionRetry(for: recording),
-               recording.transcriptionStatus == .failed {
-                Button("Retry") {
-                    model.retryTranscription(for: recording)
+            if recording.transcriptionStatus == .waitingForCredential {
+                SettingsLink {
+                    Label("Add Key…", systemImage: "key.fill")
+                }
+            } else if model.shouldOfferFinalizationRecovery(for: recording) {
+                Button(model.finalizationRecoveryEligibilityIsPending(for: recording)
+                    ? "Checking Recovery…"
+                    : "Retry Saving Audio") {
+                    model.recoverFinalization(for: recording)
+                }
+                .disabled(!model.canRecoverFinalization(for: recording))
+                .help(finalizationRetryHelp)
+                .accessibilityHint(finalizationRetryHelp)
+            } else if model.shouldOfferTranscriptionRetry(for: recording) {
+                Button(retryButtonTitle) {
+                    if model.transcriptionRetryEligibilityIsPending(for: recording) {
+                        return
+                    } else if model.transcriptionRetryIsLocal(for: recording) {
+                        model.retryTranscription(for: recording)
+                    } else {
+                        pendingReupload = recording
+                    }
                 }
                 .disabled(!model.canRetryTranscription(for: recording))
                 .help(retryHelp)
                 .accessibilityHint(retryHelp)
             } else if recording.files.transcriptMarkdown != nil,
                       recording.transcriptionStatus == .complete {
-                Button("Show in Finder") {
+                Button("Reveal Transcript") {
                     model.revealTranscript(in: recording)
                 }
             } else if recording.files.audio != nil {
-                Button("Show in Finder") {
+                Button("Reveal Audio") {
                     model.revealAudio(in: recording)
                 }
             }
@@ -138,18 +216,6 @@ private struct RecordingRow: View {
                     if recording.transcriptionStatus == .complete,
                        recording.files.transcriptMarkdown != nil {
                         Button("Reveal Transcript") { model.revealTranscript(in: recording) }
-                    }
-                    if model.shouldOfferTranscriptionRetry(for: recording) {
-                        Button(retryMenuTitle) {
-                            model.retryTranscription(for: recording)
-                        }
-                        .disabled(!model.canRetryTranscription(for: recording))
-                        .help(retryHelp)
-                    }
-                    if model.canRecoverFinalization(for: recording) {
-                        Button("Finish Saving Audio") {
-                            model.recoverFinalization(for: recording)
-                        }
                     }
                     if model.canDelete(recording) {
                         if hasNonDeleteActions {
@@ -181,9 +247,7 @@ private struct RecordingRow: View {
     private var hasNonDeleteActions: Bool {
         recording.files.audio != nil ||
             (recording.transcriptionStatus == .complete &&
-                recording.files.transcriptMarkdown != nil) ||
-            model.shouldOfferTranscriptionRetry(for: recording) ||
-            model.canRecoverFinalization(for: recording)
+                recording.files.transcriptMarkdown != nil)
     }
 
     private var hasMenuActions: Bool {
@@ -191,14 +255,28 @@ private struct RecordingRow: View {
     }
 
     private var retryHelp: String {
-        model.transcriptionRetryUnavailableReason ?? "Retry transcription"
+        if model.transcriptionRetryEligibilityIsPending(for: recording) {
+            return "Checking whether the transcript can be recreated without another upload"
+        }
+        return model.retryUnavailableReason ?? (model.transcriptionRetryIsLocal(for: recording)
+            ? "Recreate the transcript locally without another upload"
+            : "Start another paid Deepgram upload")
     }
 
-    private var retryMenuTitle: String {
-        guard let reason = model.transcriptionRetryUnavailableReason else {
-            return "Retry Transcription"
+    private var retryButtonTitle: String {
+        if model.transcriptionRetryEligibilityIsPending(for: recording) {
+            return "Checking…"
         }
-        return "Retry Transcription — \(reason)"
+        return model.transcriptionRetryIsLocal(for: recording)
+            ? "Recreate Transcript"
+            : "Upload Again…"
+    }
+
+    private var finalizationRetryHelp: String {
+        if model.finalizationRecoveryEligibilityIsPending(for: recording) {
+            return "Checking whether the retained recovery audio can be saved"
+        }
+        return model.retryUnavailableReason ?? "Retry saving audio"
     }
 }
 
@@ -206,19 +284,24 @@ private struct RecordingStatusSymbol: View {
     let recording: RecordingManifest
 
     var body: some View {
-        if recording.captureStatus == .processing ||
-            recording.transcriptionStatus == .transcribing {
-            ProgressView()
-                .controlSize(.small)
-                .accessibilityLabel(recording.statusText)
+        if recording.transcriptionStatus == .waitingForCredential {
+            Image(systemName: "key.fill")
+                .foregroundStyle(.orange)
+                .accessibilityLabel("Deepgram key needed")
         } else if recording.lastFailure != nil ||
                     recording.captureStatus == .failed ||
                     recording.transcriptionStatus == .failed {
             Image(systemName: "exclamationmark.circle.fill")
                 .foregroundStyle(.red)
                 .accessibilityLabel("Needs attention")
+        } else if recording.captureStatus == .processing ||
+                    recording.transcriptionStatus == .transcribing {
+            ProgressView()
+                .controlSize(.small)
+                .accessibilityLabel(recording.statusText)
         } else if recording.transcriptionStatus == .complete {
             Image(systemName: "checkmark.circle")
+                .foregroundStyle(.green)
                 .accessibilityLabel("Transcript ready")
         } else {
             Image(systemName: "clock")

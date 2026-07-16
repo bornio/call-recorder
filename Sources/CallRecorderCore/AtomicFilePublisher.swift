@@ -4,7 +4,7 @@ import Foundation
 enum AtomicFilePublisher {
     static func publishNewFile(_ data: Data, to destination: URL) throws {
         let temporary = destination.deletingLastPathComponent().appendingPathComponent(
-            ".\(destination.lastPathComponent).\(UUID().uuidString).partial"
+            ".call-recorder-\(destination.lastPathComponent).\(UUID().uuidString).partial"
         )
         defer { try? FileManager.default.removeItem(at: temporary) }
 

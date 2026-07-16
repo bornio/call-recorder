@@ -15,6 +15,62 @@ private struct CancelOutcome: Sendable {
     var deletionErrorMessage: String?
 }
 
+struct CaptureIssue {
+    enum Recovery {
+        case appSettings
+        case microphoneSettings
+        case systemAudioSettings
+    }
+
+    var message: String
+    var recovery: Recovery? = nil
+}
+
+enum DeepgramCredentialSource: Equatable {
+    case none
+    case keychain
+    case environment
+}
+
+private struct ImportedAudioMetadata: Sendable {
+    var duration: TimeInterval
+    var startedAt: Date
+    var timestampSource: RecordingTimestampSource
+}
+
+private func inspectImportedAudio(at audioURL: URL) throws -> ImportedAudioMetadata {
+    guard FileManager.default.isReadableFile(atPath: audioURL.path) else {
+        throw DeepgramError.unreadableAudio
+    }
+    let audio = try AVAudioFile(forReading: audioURL)
+    guard audio.processingFormat.sampleRate > 0, audio.length > 0 else {
+        throw DeepgramError.unreadableAudio
+    }
+    let duration = Double(audio.length) / audio.processingFormat.sampleRate
+    let values = try? audioURL.resourceValues(
+        forKeys: [.creationDateKey, .contentModificationDateKey]
+    )
+    if let creationDate = values?.creationDate {
+        return ImportedAudioMetadata(
+            duration: duration,
+            startedAt: creationDate,
+            timestampSource: .fileCreationDate
+        )
+    }
+    if let modificationDate = values?.contentModificationDate {
+        return ImportedAudioMetadata(
+            duration: duration,
+            startedAt: modificationDate,
+            timestampSource: .fileModificationDate
+        )
+    }
+    return ImportedAudioMetadata(
+        duration: duration,
+        startedAt: Date(),
+        timestampSource: .importTime
+    )
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     static weak var shared: AppModel?
@@ -27,11 +83,22 @@ final class AppModel: ObservableObject {
     @Published private(set) var elapsedSeconds: TimeInterval = 0
     @Published private(set) var captureStatistics: CaptureLiveStatistics = .empty
     @Published private(set) var hasDeepgramKey = false
+    @Published private(set) var hasStoredDeepgramKey = false
+    @Published private(set) var deepgramCredentialSource: DeepgramCredentialSource = .none
+    @Published private(set) var storageUsage: RecordingStorageUsage = .zero
+    @Published private(set) var isRefreshingStorage = false
+    @Published private(set) var isRefreshingHistory = false
+    @Published private(set) var isPerformingStartupCleanup = true
+    @Published private(set) var isForgettingHistory = false
     @Published private(set) var isCancelling = false
     @Published private(set) var isImportingAudio = false
-    @Published private(set) var captureErrorMessage: String?
+    @Published private(set) var captureIssue: CaptureIssue?
+    @Published private(set) var outputDirectoryErrorMessage: String?
+    @Published private(set) var keychainErrorMessage: String?
+    @Published private(set) var storageErrorMessage: String?
+    @Published private(set) var unseenTranscriptCompletionID: UUID?
+    @Published private(set) var isPreparingToTerminate = false
     @Published var historyErrorMessage: String?
-    @Published var settingsErrorMessage: String?
 
     @Published var selectedMicrophoneUID: String {
         didSet { defaults.set(selectedMicrophoneUID, forKey: Keys.microphoneUID) }
@@ -59,8 +126,13 @@ final class AppModel: ObservableObject {
     private var capturePollTask: Task<Void, Never>?
     private var fatalStopRequested = false
     private var isMenuPresented = false
-    private var isPreparingToTerminate = false
     private var terminationCompletion: (@MainActor () -> Void)?
+    @Published private var recoverableCaptureIDs: Set<UUID> = []
+    @Published private var pendingFinalizationEligibilityIDs: Set<UUID> = []
+    @Published private var localTranscriptRecoveryIDs: Set<UUID> = []
+    @Published private var pendingTranscriptEligibilityIDs: Set<UUID> = []
+    private var eligibilityGeneration = 0
+    private var storageRefreshPending = false
     private let store: RecordingStore
     private let defaults: UserDefaults
     private let keychain: KeychainStore
@@ -72,7 +144,10 @@ final class AppModel: ObservableObject {
     }
 
     var canStartRecording: Bool {
-        !isPreparingToTerminate && captureState == .ready && selectedMicrophone != nil
+        !isPreparingToTerminate &&
+            !isForgettingHistory &&
+            captureState == .ready &&
+            selectedMicrophone != nil
     }
 
     var canChangeCaptureConfiguration: Bool {
@@ -80,7 +155,47 @@ final class AppModel: ObservableObject {
     }
 
     var canImportAudio: Bool {
-        !isPreparingToTerminate && captureState == .ready && !isImportingAudio
+        !isPreparingToTerminate &&
+            !isForgettingHistory &&
+            !isRefreshingHistory &&
+            captureState == .ready &&
+            !isImportingAudio
+    }
+
+    var importUnavailableReason: String? {
+        if isPreparingToTerminate { return "Unavailable while the app is preparing to quit." }
+        if isForgettingHistory { return "Available after private history is removed." }
+        if isRefreshingHistory { return "Available after Recordings finishes refreshing." }
+        if captureState != .ready { return "Available after the current recording ends." }
+        if isImportingAudio { return "The selected audio is already being prepared." }
+        return nil
+    }
+
+    var canForgetHistory: Bool {
+        !isPreparingToTerminate &&
+            captureState == .ready &&
+            backgroundActivity == nil &&
+            !isForgettingHistory &&
+            !isImportingAudio &&
+            !isRefreshingStorage &&
+            !isRefreshingHistory &&
+            !isPerformingStartupCleanup &&
+            storageUsage.privateHistoryBytes > 0 &&
+            pendingRecordingCount == 0
+    }
+
+    var forgetHistoryUnavailableReason: String? {
+        if isForgettingHistory { return "Removing private app history…" }
+        if isImportingAudio { return "Available after the selected audio finishes importing." }
+        if isRefreshingStorage || isRefreshingHistory { return "Available after storage refresh finishes." }
+        if isPerformingStartupCleanup { return "Available after startup cleanup finishes." }
+        if storageUsage.privateHistoryBytes == 0 { return "No private app history to remove." }
+        if isPreparingToTerminate { return "Unavailable while the app is preparing to quit." }
+        if captureState != .ready { return "Available after the current recording ends." }
+        if backgroundActivity != nil || pendingRecordingCount > 0 {
+            return "Available after recordings finish processing."
+        }
+        return nil
     }
 
     var hasActiveTranscription: Bool {
@@ -102,7 +217,20 @@ final class AppModel: ObservableObject {
            let recording = recordings.first(where: { $0.id == id }) {
             return recording
         }
-        return recordings.first { $0.id != activeCapture?.id }
+        let candidates = recordings.filter { $0.id != activeCapture?.id }
+        if captureState == .ready,
+           let actionable = candidates.first(where: Self.needsAttention) {
+            return actionable
+        }
+        return candidates.first
+    }
+
+    var hasRecordingNeedingAttention: Bool {
+        recordings.contains(where: Self.needsAttention)
+    }
+
+    var hasUnseenTranscriptCompletion: Bool {
+        unseenTranscriptCompletionID != nil
     }
 
     var pendingRecordingCount: Int {
@@ -177,12 +305,45 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             backgroundActivity = activity
             reloadHistory()
+            refreshStorageUsage()
+            if let recordingID = activity?.recordingID,
+               !isMenuPresented,
+               recordings.first(where: { $0.id == recordingID })?.transcriptionStatus == .complete {
+                unseenTranscriptCompletionID = recordingID
+            }
             completePendingTerminationIfReady()
         }
         refreshMicrophones()
         refreshCredentialStatus()
         reloadHistory(recoverInterrupted: true, reconcile: true)
-        jobQueue.start()
+
+        let staleArtifactCutoff = Date().addingTimeInterval(-24 * 60 * 60)
+        let artifactDirectories = Set(
+            [outputDirectory] + ((try? store.loadAll()) ?? []).compactMap { recording in
+                guard recording.effectiveOrigin == .nativeRecording else { return nil }
+                return recording.files.exportDirectory.map {
+                    URL(fileURLWithPath: $0, isDirectory: true)
+                        .deletingLastPathComponent()
+                }
+            }
+        )
+        Task { [weak self] in
+            await Task.detached(priority: .utility) {
+                try? store.cleanupStalePrivateArtifacts(olderThan: staleArtifactCutoff)
+                for directory in artifactDirectories {
+                    try? AudioExportService.cleanupStaleArtifacts(
+                        in: directory,
+                        olderThan: staleArtifactCutoff
+                    )
+                }
+            }.value
+            guard let self else { return }
+            isPerformingStartupCleanup = false
+            refreshStorageUsage()
+            if captureState == .ready {
+                jobQueue.start()
+            }
+        }
     }
 
     func refreshMicrophones() {
@@ -198,15 +359,87 @@ final class AppModel: ObservableObject {
             if recoverInterrupted {
                 try store.recoverInterruptedRecordings()
             }
-            recordings = reconcile ? try store.reconcileExternalFiles() : try store.loadAll()
+            applyRecordings(reconcile ? try store.reconcileExternalFiles() : try store.loadAll())
         } catch {
             historyErrorMessage = error.localizedDescription
         }
     }
 
+    func refreshHistoryFromFinder() {
+        guard !isRefreshingHistory else { return }
+        guard backgroundActivity == nil, pendingRecordingCount == 0 else {
+            reloadHistory()
+            return
+        }
+        isRefreshingHistory = true
+        let store = self.store
+        Task {
+            let result = await Task.detached(priority: .utility) {
+                Result { try store.reconcileExternalFiles() }
+            }.value
+            isRefreshingHistory = false
+            switch result {
+            case .success(let recordings):
+                applyRecordings(recordings)
+                refreshStorageUsage()
+                if hasDeepgramKey {
+                    resumeWaitingTranscriptions()
+                }
+            case .failure(let error):
+                historyErrorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func applyRecordings(_ loadedRecordings: [RecordingManifest]) {
+        recordings = loadedRecordings
+        recoverableCaptureIDs = []
+        pendingFinalizationEligibilityIDs = Set(loadedRecordings.lazy.filter {
+            FinalizationRecoveryPolicy.canRecover(
+                $0,
+                hasRecoverableCapture: true
+            )
+        }.map(\.id))
+        localTranscriptRecoveryIDs = []
+        pendingTranscriptEligibilityIDs = Set(loadedRecordings.lazy.filter {
+            TranscriptionRetryPolicy.canRetry($0)
+        }.map(\.id))
+        if let unseenTranscriptCompletionID,
+           !recordings.contains(where: {
+               $0.id == unseenTranscriptCompletionID &&
+                   $0.transcriptionStatus == .complete
+           }) {
+            self.unseenTranscriptCompletionID = nil
+        }
+        eligibilityGeneration += 1
+        let generation = eligibilityGeneration
+        let store = self.store
+        Task {
+            let result = await Task.detached(priority: .utility) {
+                let recoverable = Set(loadedRecordings.lazy.filter { recording in
+                    FinalizationRecoveryPolicy.canRecover(
+                        recording,
+                        hasRecoverableCapture: true
+                    ) && store.hasClosedCaptureMetadata(for: recording)
+                }.map(\.id))
+                let localRetries = Set(loadedRecordings.lazy.filter { recording in
+                    TranscriptionRetryPolicy.canRetry(recording) &&
+                        store.hasValidRetainedTranscriptResponse(for: recording)
+                }.map(\.id))
+                return (recoverable, localRetries)
+            }.value
+            guard generation == eligibilityGeneration else { return }
+            recoverableCaptureIDs = result.0
+            pendingFinalizationEligibilityIDs = []
+            localTranscriptRecoveryIDs = result.1
+            pendingTranscriptEligibilityIDs = []
+        }
+    }
+
     func startRecording() {
         guard canStartRecording, transitionCapture(.startRequested) else { return }
-        captureErrorMessage = nil
+        jobQueue.suspendNewWork()
+        captureIssue = nil
         Task { await beginRecording() }
     }
 
@@ -229,9 +462,11 @@ final class AppModel: ObservableObject {
             pausedAt = now
             captureStatistics = captureEngine.statistics()
             captureState = captureStateMachine.state
-            captureErrorMessage = nil
+            captureIssue = nil
         } catch {
-            captureErrorMessage = "Unable to pause recording: \(error.localizedDescription)"
+            captureIssue = CaptureIssue(
+                message: "Unable to pause recording: \(error.localizedDescription)"
+            )
         }
     }
 
@@ -251,22 +486,34 @@ final class AppModel: ObservableObject {
             }
             self.pausedAt = nil
             captureState = captureStateMachine.state
-            captureErrorMessage = nil
+            captureIssue = nil
         } catch {
-            captureErrorMessage = "Unable to resume recording: \(error.localizedDescription)"
+            captureIssue = CaptureIssue(
+                message: "Unable to resume recording: \(error.localizedDescription)"
+            )
         }
     }
 
     func cancelRecording() {
-        guard isCaptureActive, !isCancelling,
-              transitionCapture(.stopRequested)
-        else { return }
+        guard isCaptureActive, !isCancelling, let activeCapture else { return }
+        do {
+            try store.markDiscardRequested(for: activeCapture)
+        } catch {
+            captureIssue = CaptureIssue(
+                message: "Unable to secure the discard request. Recording continues: \(error.localizedDescription)"
+            )
+            return
+        }
+        guard transitionCapture(.stopRequested) else { return }
         isCancelling = true
         Task { await discardActiveCapture() }
     }
 
     func setMenuPresented(_ presented: Bool) {
         isMenuPresented = presented
+        if presented {
+            unseenTranscriptCompletionID = nil
+        }
         if presented, isCaptureActive, let captureEngine {
             captureStatistics = captureEngine.statistics()
         }
@@ -281,6 +528,26 @@ final class AppModel: ObservableObject {
     }
 
     func retryTranscription(for original: RecordingManifest) {
+        guard localTranscriptRecoveryIDs.contains(original.id) else { return }
+        queueTranscription(for: original, discardingRetainedResponse: false)
+    }
+
+    func reuploadTranscription(for original: RecordingManifest) {
+        queueTranscription(for: original, discardingRetainedResponse: true)
+    }
+
+    func transcriptionRetryIsLocal(for recording: RecordingManifest) -> Bool {
+        localTranscriptRecoveryIDs.contains(recording.id)
+    }
+
+    func transcriptionRetryEligibilityIsPending(for recording: RecordingManifest) -> Bool {
+        pendingTranscriptEligibilityIDs.contains(recording.id)
+    }
+
+    private func queueTranscription(
+        for original: RecordingManifest,
+        discardingRetainedResponse: Bool
+    ) {
         guard !isPreparingToTerminate,
               captureState == .ready,
               !jobQueue.isWorking(on: original.id),
@@ -292,6 +559,11 @@ final class AppModel: ObservableObject {
             recording.lastFailure = nil
         }
         do {
+            if discardingRetainedResponse &&
+                store.expectsRetainedTranscriptResponse(for: recording) {
+                try store.removeRetainedTranscriptResponse(for: recording)
+                recording.files.transcriptJSON = nil
+            }
             try store.save(recording)
             reloadHistory()
             jobQueue.wake()
@@ -303,6 +575,9 @@ final class AppModel: ObservableObject {
     func canRetryTranscription(for recording: RecordingManifest) -> Bool {
         !isPreparingToTerminate &&
             captureState == .ready &&
+            !isRefreshingHistory &&
+            !isPerformingStartupCleanup &&
+            !pendingTranscriptEligibilityIDs.contains(recording.id) &&
             !jobQueue.isWorking(on: recording.id) &&
             TranscriptionRetryPolicy.canRetry(recording)
     }
@@ -312,19 +587,24 @@ final class AppModel: ObservableObject {
             TranscriptionRetryPolicy.canRetry(recording)
     }
 
-    var transcriptionRetryUnavailableReason: String? {
+    var retryUnavailableReason: String? {
         if isPreparingToTerminate {
             return "The app is preparing to quit."
         }
         if captureState != .ready {
             return "Available after the current recording ends."
         }
+        if isRefreshingHistory {
+            return "Available after Recordings finishes refreshing."
+        }
+        if isPerformingStartupCleanup {
+            return "Available after startup cleanup finishes."
+        }
         return nil
     }
 
     func recoverFinalization(for original: RecordingManifest) {
-        guard !jobQueue.isWorking(on: original.id),
-              FinalizationRecoveryPolicy.canRecover(original),
+        guard canRecoverFinalization(for: original),
               var recording = try? store.load(id: original.id)
         else { return }
         recording.files.audio = nil
@@ -344,35 +624,80 @@ final class AppModel: ObservableObject {
     }
 
     func canRecoverFinalization(for recording: RecordingManifest) -> Bool {
+        !isPreparingToTerminate &&
+            captureState == .ready &&
+            !isRefreshingHistory &&
+            !isPerformingStartupCleanup &&
+            !pendingFinalizationEligibilityIDs.contains(recording.id) &&
+            shouldOfferFinalizationRecovery(for: recording)
+    }
+
+    func shouldOfferFinalizationRecovery(for recording: RecordingManifest) -> Bool {
         !jobQueue.isWorking(on: recording.id) &&
-            FinalizationRecoveryPolicy.canRecover(recording)
+            (pendingFinalizationEligibilityIDs.contains(recording.id) ||
+                FinalizationRecoveryPolicy.canRecover(
+                    recording,
+                    hasRecoverableCapture: recoverableCaptureIDs.contains(recording.id)
+                ))
+    }
+
+    func finalizationRecoveryEligibilityIsPending(
+        for recording: RecordingManifest
+    ) -> Bool {
+        pendingFinalizationEligibilityIDs.contains(recording.id)
     }
 
     func canDelete(_ recording: RecordingManifest) -> Bool {
-        activeCapture?.id != recording.id && !jobQueue.isWorking(on: recording.id)
+        !isPreparingToTerminate &&
+            captureState == .ready &&
+            !isRefreshingHistory &&
+            !isPerformingStartupCleanup &&
+            activeCapture?.id != recording.id &&
+            !jobQueue.isWorking(on: recording.id)
     }
 
     func delete(_ recording: RecordingManifest) {
         guard canDelete(recording) else { return }
         do {
+            var keptUnverifiedFinderFiles = false
             if recording.effectiveOrigin == .nativeRecording {
                 let audioURL = try store.audioURL(for: recording)
                 let transcriptURL = try store.transcriptURL(for: recording)
-                for url in [audioURL, transcriptURL].compactMap({ $0 })
-                where FileManager.default.fileExists(atPath: url.path) {
-                    try FileManager.default.removeItem(at: url)
+                let publicURLs = [audioURL, transcriptURL].compactMap { $0 }
+                for url in publicURLs where FileManager.default.fileExists(atPath: url.path) {
+                    let directory = url.deletingLastPathComponent()
+                    if AudioExportService.publicationBelongs(
+                        in: directory,
+                        to: recording.id
+                    ) {
+                        try FileManager.default.removeItem(at: url)
+                    } else {
+                        keptUnverifiedFinderFiles = true
+                    }
                 }
-                if let exportedDirectory = audioURL?.deletingLastPathComponent()
-                    ?? transcriptURL?.deletingLastPathComponent(),
-                   (try? FileManager.default.contentsOfDirectory(
-                    atPath: exportedDirectory.path
-                   ))?.isEmpty == true {
-                    try FileManager.default.removeItem(at: exportedDirectory)
+                for exportedDirectory in Set(publicURLs.map { $0.deletingLastPathComponent() })
+                where AudioExportService.publicationBelongs(
+                    in: exportedDirectory,
+                    to: recording.id
+                ) {
+                    try AudioExportService.removePublicationMarker(
+                        in: exportedDirectory,
+                        recordingID: recording.id
+                    )
+                    if (try? FileManager.default.contentsOfDirectory(
+                        atPath: exportedDirectory.path
+                    ))?.isEmpty == true {
+                        try FileManager.default.removeItem(at: exportedDirectory)
+                    }
                 }
             }
             try store.delete(recording)
             reloadHistory()
+            refreshStorageUsage()
             jobQueue.wake()
+            if keptUnverifiedFinderFiles {
+                historyErrorMessage = "History was removed, but Finder files were kept because Call Recorder could not verify their ownership."
+            }
         } catch {
             historyErrorMessage = error.localizedDescription
         }
@@ -398,6 +723,7 @@ final class AppModel: ObservableObject {
 
     func chooseOutputDirectory() {
         guard canChangeCaptureConfiguration else { return }
+        outputDirectoryErrorMessage = nil
         let panel = NSOpenPanel()
         panel.title = "Choose recording folder"
         panel.canChooseDirectories = true
@@ -408,17 +734,18 @@ final class AppModel: ObservableObject {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             guard try outputDirectoryIsLocal(url) else {
-                settingsErrorMessage = "Choose a local, non-cloud-synced folder so " +
+                outputDirectoryErrorMessage = "Choose a local, non-cloud-synced folder so " +
                     "recording stays local during the call."
                 return
             }
         } catch {
-            settingsErrorMessage = "Unable to verify the selected folder: \(error.localizedDescription)"
+            outputDirectoryErrorMessage =
+                "Unable to verify the selected folder: \(error.localizedDescription)"
             return
         }
         outputDirectory = url.standardizedFileURL
         defaults.set(outputDirectory.path, forKey: Keys.outputDirectory)
-        settingsErrorMessage = nil
+        outputDirectoryErrorMessage = nil
     }
 
     func chooseAudioForTranscription() {
@@ -447,11 +774,10 @@ final class AppModel: ObservableObject {
         do {
             try keychain.saveDeepgramAPIKey(key)
             refreshCredentialStatus()
-            resumeWaitingTranscriptions()
-            settingsErrorMessage = nil
+            keychainErrorMessage = nil
             return true
         } catch {
-            settingsErrorMessage = error.localizedDescription
+            keychainErrorMessage = error.localizedDescription
             return false
         }
     }
@@ -460,14 +786,99 @@ final class AppModel: ObservableObject {
         do {
             try keychain.deleteDeepgramAPIKey()
             refreshCredentialStatus()
-            settingsErrorMessage = nil
+            keychainErrorMessage = nil
         } catch {
-            settingsErrorMessage = error.localizedDescription
+            keychainErrorMessage = error.localizedDescription
         }
     }
 
     func refreshCredentialStatus() {
-        hasDeepgramKey = keychain.hasDeepgramAPIKey()
+        let environmentKey = ProcessInfo.processInfo.environment["DEEPGRAM_API_KEY"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let storedKey: String?
+        do {
+            storedKey = try keychain.deepgramAPIKey()?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            storedKey = nil
+            keychainErrorMessage = error.localizedDescription
+        }
+        hasStoredDeepgramKey = storedKey?.isEmpty == false
+        if environmentKey?.isEmpty == false {
+            deepgramCredentialSource = .environment
+        } else if hasStoredDeepgramKey {
+            deepgramCredentialSource = .keychain
+        } else {
+            deepgramCredentialSource = .none
+        }
+        hasDeepgramKey = deepgramCredentialSource != .none
+        if hasDeepgramKey {
+            resumeWaitingTranscriptions()
+        }
+    }
+
+    func refreshStorageUsage() {
+        if isRefreshingStorage {
+            storageRefreshPending = true
+            return
+        }
+        guard !isForgettingHistory else { return }
+        storageErrorMessage = nil
+        isRefreshingStorage = true
+        let store = self.store
+        Task {
+            let result = await Task.detached(priority: .utility) {
+                Result { try store.storageUsage() }
+            }.value
+            isRefreshingStorage = false
+            switch result {
+            case .success(let usage):
+                storageUsage = usage
+            case .failure(let error):
+                storageErrorMessage = error.localizedDescription
+            }
+            if storageRefreshPending {
+                storageRefreshPending = false
+                refreshStorageUsage()
+            }
+        }
+    }
+
+    func recoveryBytes(for recording: RecordingManifest) -> Int64 {
+        storageUsage.recoveryBytesByRecordingID[recording.id] ?? 0
+    }
+
+    func openAppDataFolder() {
+        storageErrorMessage = nil
+        let directory = store.rootDirectory.deletingLastPathComponent()
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            if !NSWorkspace.shared.open(directory) {
+                storageErrorMessage = "The app data folder could not be opened in Finder."
+            }
+        } catch {
+            storageErrorMessage = error.localizedDescription
+        }
+    }
+
+    func forgetHistoryKeepingExports() {
+        guard canForgetHistory else { return }
+        storageErrorMessage = nil
+        isForgettingHistory = true
+        let store = self.store
+        Task {
+            let result = await Task.detached(priority: .utility) {
+                Result { try store.forgetAllHistory() }
+            }.value
+            isForgettingHistory = false
+            switch result {
+            case .success:
+                reloadHistory()
+                storageUsage = .zero
+            case .failure(let error):
+                storageErrorMessage = error.localizedDescription
+            }
+        }
     }
 
     func normalizeLocalSpeakerName() {
@@ -541,26 +952,35 @@ final class AppModel: ObservableObject {
 
     private func beginRecording() async {
         guard captureState == .starting else { return }
-        jobQueue.suspendNewWork()
         refreshMicrophones()
         guard let microphone = selectedMicrophone else {
             captureStartFailed("No microphone is available.")
             return
         }
+        outputDirectoryErrorMessage = nil
         do {
             guard try outputDirectoryIsLocal(outputDirectory) else {
+                let message = "Choose a local, non-cloud-synced folder before recording."
+                outputDirectoryErrorMessage = message
                 captureStartFailed(
-                    "Choose a local, non-cloud-synced output folder before recording."
+                    message,
+                    recovery: .appSettings
                 )
                 return
             }
         } catch {
-            captureStartFailed("Unable to verify the output folder: \(error.localizedDescription)")
+            let message = "Unable to verify the output folder: \(error.localizedDescription)"
+            outputDirectoryErrorMessage = message
+            captureStartFailed(
+                message,
+                recovery: .appSettings
+            )
             return
         }
         guard await requestMicrophoneAccess() else {
             captureStartFailed(
-                "Microphone access was denied. Grant it in System Settings → Privacy & Security → Microphone."
+                "Microphone access was denied. Grant access in System Settings, then try again.",
+                recovery: .microphoneSettings
             )
             return
         }
@@ -580,7 +1000,7 @@ final class AppModel: ObservableObject {
                 ),
                 keyterms: activeKeyterms
             )
-            recording.routeBefore = try CaptureEngine.defaultAudioRoutes()
+            recording.routeBefore = try? CaptureEngine.defaultAudioRoutes()
             try store.save(recording)
             let systemDirectory = try store.url(
                 for: recording.files.systemCaptureDirectory,
@@ -602,11 +1022,14 @@ final class AppModel: ObservableObject {
             } catch {
                 recording.captureStatus = .failed
                 recording.stoppedAt = Date()
+                recording.captureEndedAt = recording.stoppedAt
                 recording.lastFailure = RecordingFailure(
                     stage: .capture,
-                    message: error.localizedDescription
+                    message: "Recording did not start: \(error.localizedDescription)"
                 )
                 try? store.save(recording)
+                try? store.markDiscardRequested(for: recording)
+                try? store.delete(recording)
                 throw error
             }
 
@@ -640,7 +1063,16 @@ final class AppModel: ObservableObject {
             startCapturePolling()
             reloadHistory()
         } catch {
-            captureStartFailed(error.localizedDescription)
+            let message = error.localizedDescription
+            let recovery: CaptureIssue.Recovery?
+            if message.localizedCaseInsensitiveContains("System Audio Recording permission") {
+                recovery = .systemAudioSettings
+            } else if message.localizedCaseInsensitiveContains("Microphone permission") {
+                recovery = .microphoneSettings
+            } else {
+                recovery = nil
+            }
+            captureStartFailed(message, recovery: recovery)
             reloadHistory()
         }
     }
@@ -708,11 +1140,15 @@ final class AppModel: ObservableObject {
         _ = transitionCapture(.stopped)
         resumeBackgroundWorkAfterCapture()
         reloadHistory()
+        refreshStorageUsage()
         if saved {
             if let failureMessage {
-                captureErrorMessage = "Recording stopped. Audio captured so far was secured locally. \(failureMessage)"
+                captureIssue = CaptureIssue(
+                    message: "Recording stopped. Audio captured so far was secured locally. " +
+                        failureMessage
+                )
             } else {
-                captureErrorMessage = nil
+                captureIssue = nil
             }
         }
         completePendingTerminationIfReady()
@@ -762,11 +1198,15 @@ final class AppModel: ObservableObject {
         _ = transitionCapture(.stopped)
         resumeBackgroundWorkAfterCapture()
         reloadHistory()
+        refreshStorageUsage()
 
         if let deletionErrorMessage = outcome.deletionErrorMessage {
-            captureErrorMessage = "Recording stopped, but its local files could not be removed: \(deletionErrorMessage)"
+            captureIssue = CaptureIssue(
+                message: "Recording stopped, but its local files could not be removed: " +
+                    deletionErrorMessage
+            )
         } else {
-            captureErrorMessage = nil
+            captureIssue = nil
         }
         completePendingTerminationIfReady()
     }
@@ -781,29 +1221,9 @@ final class AppModel: ObservableObject {
     private func prepareImportedAudio(_ audioURL: URL) async {
         defer { isImportingAudio = false }
         do {
-            guard FileManager.default.isReadableFile(atPath: audioURL.path) else {
-                throw DeepgramError.unreadableAudio
-            }
-            let audio = try AVAudioFile(forReading: audioURL)
-            guard audio.processingFormat.sampleRate > 0, audio.length > 0 else {
-                throw DeepgramError.unreadableAudio
-            }
-            let duration = Double(audio.length) / audio.processingFormat.sampleRate
-            let values = try? audioURL.resourceValues(
-                forKeys: [.creationDateKey, .contentModificationDateKey]
-            )
-            let startedAt: Date
-            let timestampSource: RecordingTimestampSource
-            if let creationDate = values?.creationDate {
-                startedAt = creationDate
-                timestampSource = .fileCreationDate
-            } else if let modificationDate = values?.contentModificationDate {
-                startedAt = modificationDate
-                timestampSource = .fileModificationDate
-            } else {
-                startedAt = Date()
-                timestampSource = .importTime
-            }
+            let metadata = try await Task.detached(priority: .userInitiated) {
+                try inspectImportedAudio(at: audioURL)
+            }.value
             let transcriptURL = store.availableTranscriptURL(
                 beside: audioURL,
                 origin: .importedAudio
@@ -814,15 +1234,15 @@ final class AppModel: ObservableObject {
                 microphoneUID: "",
                 microphoneName: "Imported audio",
                 keyterms: activeKeyterms,
-                now: startedAt
+                now: metadata.startedAt
             )
             recording.origin = .importedAudio
-            recording.timestampSource = timestampSource
-            recording.captureStartedAt = startedAt
-            recording.captureEndedAt = startedAt.addingTimeInterval(duration)
+            recording.timestampSource = metadata.timestampSource
+            recording.captureStartedAt = metadata.startedAt
+            recording.captureEndedAt = metadata.startedAt.addingTimeInterval(metadata.duration)
             recording.stoppedAt = recording.captureEndedAt
             recording.timeZoneIdentifier = TimeZone.current.identifier
-            recording.durationSeconds = duration
+            recording.durationSeconds = metadata.duration
             recording.captureStatus = .complete
             recording.files.exportDirectory = audioURL.deletingLastPathComponent().path
             recording.files.audio = audioURL.path
@@ -838,6 +1258,7 @@ final class AppModel: ObservableObject {
                 try store.save(recording)
             }
             reloadHistory()
+            refreshStorageUsage()
             jobQueue.wake()
         } catch {
             historyErrorMessage = error.localizedDescription
@@ -846,6 +1267,7 @@ final class AppModel: ObservableObject {
     }
 
     private func resumeWaitingTranscriptions() {
+        guard !isRefreshingHistory else { return }
         do {
             for var recording in try store.loadAll()
             where recording.captureStatus == .complete &&
@@ -930,7 +1352,7 @@ final class AppModel: ObservableObject {
     }
 
     private func resumeBackgroundWorkAfterCapture() {
-        if !isPreparingToTerminate {
+        if !isPreparingToTerminate, !isPerformingStartupCleanup {
             jobQueue.captureDidEnd()
         }
     }
@@ -958,11 +1380,14 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func captureStartFailed(_ message: String) {
+    private func captureStartFailed(
+        _ message: String,
+        recovery: CaptureIssue.Recovery? = nil
+    ) {
         if captureState == .starting {
             _ = transitionCapture(.startFailed)
         }
-        captureErrorMessage = message
+        captureIssue = CaptureIssue(message: message, recovery: recovery)
         resumeBackgroundWorkAfterCapture()
     }
 
@@ -973,7 +1398,7 @@ final class AppModel: ObservableObject {
             captureState = captureStateMachine.state
             return true
         } catch {
-            captureErrorMessage = error.localizedDescription
+            captureIssue = CaptureIssue(message: error.localizedDescription)
             return false
         }
     }
@@ -984,7 +1409,9 @@ final class AppModel: ObservableObject {
             try store.save(recording)
             return true
         } catch {
-            captureErrorMessage = "Unable to save recording status: \(error.localizedDescription)"
+            captureIssue = CaptureIssue(
+                message: "Unable to save recording status: \(error.localizedDescription)"
+            )
             return false
         }
     }
@@ -1005,6 +1432,13 @@ final class AppModel: ObservableObject {
         let values = try existingURL.resourceValues(forKeys: [.volumeIsLocalKey])
         return values.volumeIsLocal != false &&
             !FileManager.default.isUbiquitousItem(at: existingURL)
+    }
+
+    private static func needsAttention(_ recording: RecordingManifest) -> Bool {
+        recording.lastFailure != nil ||
+            recording.captureStatus == .failed ||
+            recording.transcriptionStatus == .failed ||
+            recording.transcriptionStatus == .waitingForCredential
     }
 
     private enum Keys {

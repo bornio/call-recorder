@@ -372,7 +372,7 @@ public struct RecordingFinalizer: Sendable {
     }
 }
 
-private struct CaptureChunk: Decodable, Sendable {
+struct CaptureChunk: Decodable, Sendable {
     var file: String
     var firstHostTime: UInt64
     var lastHostTime: UInt64

@@ -5,10 +5,21 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
     @State private var newAPIKey = ""
+    @State private var showingRemoveKeyConfirmation = false
+    @State private var showingForgetHistoryConfirmation = false
 
     var body: some View {
         Form {
             Section("Recording") {
+                if !model.canChangeCaptureConfiguration {
+                    Label(
+                        "Stop recording to change these settings.",
+                        systemImage: "lock.fill"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+
                 Picker("Microphone", selection: $model.selectedMicrophoneUID) {
                     Text(model.automaticMicrophoneLabel)
                         .tag(AppModel.automaticMicrophoneUID)
@@ -26,10 +37,10 @@ struct SettingsView: View {
                 .disabled(!model.canChangeCaptureConfiguration)
 
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("Your transcript name")
+                    Text("Your name in transcripts")
                     TextField("Enter your name", text: $model.localSpeakerName)
                         .textFieldStyle(.roundedBorder)
-                        .accessibilityLabel("Your transcript name")
+                        .accessibilityLabel("Your name in transcripts")
                         .disabled(!model.canChangeCaptureConfiguration)
                         .onSubmit { model.normalizeLocalSpeakerName() }
                     Text("Type the name that should label your microphone channel.")
@@ -46,9 +57,14 @@ struct SettingsView: View {
                             .disabled(!model.canChangeCaptureConfiguration)
                     }
                 }
-                Text("Each finished call becomes one clean folder with Audio.m4a and, when transcription succeeds, Transcript.md. Temporary recovery files stay private and are removed after the compressed audio is validated.")
+                Text("Each call is saved in its own folder with Audio.m4a and, when transcription succeeds, Transcript.md.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if let error = model.outputDirectoryErrorMessage {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
             }
 
             Section("Transcription accuracy") {
@@ -91,7 +107,9 @@ struct SettingsView: View {
                 HStack {
                     Image(systemName: model.hasDeepgramKey ? "checkmark.circle.fill" : "circle")
                         .foregroundStyle(model.hasDeepgramKey ? .green : .secondary)
-                    Text(model.hasDeepgramKey ? "Deepgram credential available" : "No Deepgram credential available")
+                    Text(
+                        credentialStatusText
+                    )
                 }
                 SecureField("New Deepgram API key", text: $newAPIKey)
                     .textContentType(.password)
@@ -102,15 +120,68 @@ struct SettingsView: View {
                         }
                     }
                     .disabled(newAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    Button("Remove Key", role: .destructive) {
-                        model.removeDeepgramKey()
-                        newAPIKey = ""
+                    Button("Remove Keychain Key", role: .destructive) {
+                        showingRemoveKeyConfirmation = true
                     }
-                    .disabled(!model.hasDeepgramKey)
+                    .disabled(!model.hasStoredDeepgramKey)
                 }
-                Text("The key is never displayed or written to recording files. DEEPGRAM_API_KEY may be used as a development-only override.")
+                Text(credentialDetailText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if let error = model.keychainErrorMessage {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+
+            Section("Storage") {
+                LabeledContent("Private app history") {
+                    Text(formattedBytes(model.storageUsage.privateHistoryBytes))
+                        .monospacedDigit()
+                }
+                LabeledContent("Audio recovery data") {
+                    Text(formattedBytes(model.storageUsage.recoveryBytes))
+                        .monospacedDigit()
+                }
+                Text("Private history includes saved Deepgram responses used to recreate transcripts without another paid upload. Recovery data is temporary audio retained after an interruption or failed save.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Button("Open App Data Folder") { model.openAppDataFolder() }
+                    Button("Refresh") { model.refreshStorageUsage() }
+                        .disabled(model.isRefreshingStorage)
+                    if model.isRefreshingStorage {
+                        ProgressView()
+                            .controlSize(.small)
+                            .accessibilityLabel("Refreshing storage usage")
+                    }
+                    Spacer()
+                    Button(role: .destructive) {
+                        showingForgetHistoryConfirmation = true
+                    } label: {
+                        if model.isForgettingHistory {
+                            HStack(spacing: 6) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text("Forgetting History…")
+                            }
+                        } else {
+                            Text("Forget History, Keep Finder Files…")
+                        }
+                    }
+                    .disabled(!model.canForgetHistory)
+                }
+                if let reason = model.forgetHistoryUnavailableReason {
+                    Text(reason)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let error = model.storageErrorMessage {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
             }
 
             Section("Permissions") {
@@ -122,23 +193,71 @@ struct SettingsView: View {
                 }
             }
 
-            if let error = model.settingsErrorMessage {
-                Section {
-                    Text(error)
-                        .foregroundStyle(.red)
-                }
-            }
         }
         .formStyle(.grouped)
         .padding()
         .onAppear {
             model.refreshMicrophones()
             model.refreshCredentialStatus()
+            model.refreshStorageUsage()
         }
         .onDisappear {
             newAPIKey = ""
             model.normalizeLocalSpeakerName()
             model.normalizeKeyterms()
         }
+        .confirmationDialog(
+            "Remove the saved Deepgram key?",
+            isPresented: $showingRemoveKeyConfirmation
+        ) {
+            Button("Remove Keychain Key", role: .destructive) {
+                model.removeDeepgramKey()
+                newAPIKey = ""
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(removeKeyConfirmationMessage)
+        }
+        .confirmationDialog(
+            "Forget all app history?",
+            isPresented: $showingForgetHistoryConfirmation
+        ) {
+            Button("Forget History", role: .destructive) {
+                model.forgetHistoryKeepingExports()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes private manifests, saved Deepgram responses, and recovery audio. Every Finder file remains, including app exports and imported source audio. This cannot be undone.")
+        }
     }
+
+    private var credentialStatusText: String {
+        switch model.deepgramCredentialSource {
+        case .environment: "Deepgram key ready from environment"
+        case .keychain: "Deepgram key ready from Keychain"
+        case .none: "Add a Deepgram API key to transcribe recordings"
+        }
+    }
+
+    private var credentialDetailText: String {
+        switch model.deepgramCredentialSource {
+        case .environment:
+            "DEEPGRAM_API_KEY currently takes precedence. A key saved here is stored in Keychain and never written to recording files."
+        case .keychain:
+            "The key is stored securely in Keychain and is never written to recording files."
+        case .none:
+            "Keys saved here are stored securely in Keychain and never written to recording files."
+        }
+    }
+
+    private var removeKeyConfirmationMessage: String {
+        if model.deepgramCredentialSource == .environment {
+            return "This removes only the saved Keychain key. DEEPGRAM_API_KEY remains active and is not changed."
+        }
+        return "Future recordings will need another key before they can be transcribed."
+    }
+}
+
+private func formattedBytes(_ bytes: Int64) -> String {
+    ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
 }

@@ -33,7 +33,10 @@ public struct RecordingPostProcessor: Sendable {
         let publishedAudio = destinationDirectory.appendingPathComponent("Audio.m4a")
         if FileManager.default.fileExists(atPath: publishedAudio.path) {
             return RecordingPostProcessingResult(
-                publication: try audioExportService.recoverPublication(in: destinationDirectory),
+                publication: try audioExportService.recoverPublication(
+                    in: destinationDirectory,
+                    recordingID: recording.id
+                ),
                 warnings: []
             )
         }

@@ -17,6 +17,7 @@ public struct PublishedRecordingAudio: Equatable, Sendable {
 public enum AudioExportError: LocalizedError, Sendable {
     case invalidSource
     case invalidCompressedAudio
+    case publicationDoesNotBelongToRecording
     case unableToCreateExportDirectory
 
     public var errorDescription: String? {
@@ -25,6 +26,8 @@ public enum AudioExportError: LocalizedError, Sendable {
             "The finalized recording is not a readable two-channel audio file."
         case .invalidCompressedAudio:
             "The compressed audio could not be validated. Recovery files were preserved."
+        case .publicationDoesNotBelongToRecording:
+            "The existing Audio.m4a was not created for this recording. Recovery files were preserved."
         case .unableToCreateExportDirectory:
             "The clean recording folder could not be created."
         }
@@ -33,6 +36,12 @@ public enum AudioExportError: LocalizedError, Sendable {
 
 public struct AudioExportService: Sendable {
     public static let bitRate = 128_000
+    public static let publicationMarkerName = ".call-recorder-publication.json"
+
+    private struct PublicationMarker: Codable {
+        var version: Int
+        var recordingID: UUID
+    }
 
     public init() {}
 
@@ -76,6 +85,12 @@ public struct AudioExportService: Sendable {
             audioURL: stagedAudio,
             expectedDuration: Double(source.length) / source.processingFormat.sampleRate
         )
+        let marker = PublicationMarker(version: 1, recordingID: recording.id)
+        let markerData = try JSONEncoder().encode(marker)
+        try markerData.write(
+            to: stagingDirectory.appendingPathComponent(Self.publicationMarkerName),
+            options: [.atomic]
+        )
 
         let destinationDirectory = destinationDirectory ?? publicationDirectory(
             for: recording,
@@ -111,7 +126,18 @@ public struct AudioExportService: Sendable {
         )
     }
 
-    public func recoverPublication(in directoryURL: URL) throws -> PublishedRecordingAudio {
+    public func recoverPublication(
+        in directoryURL: URL,
+        recordingID: UUID
+    ) throws -> PublishedRecordingAudio {
+        let markerURL = directoryURL.appendingPathComponent(Self.publicationMarkerName)
+        guard let markerData = try? Data(contentsOf: markerURL),
+              let marker = try? JSONDecoder().decode(PublicationMarker.self, from: markerData),
+              marker.version == 1,
+              marker.recordingID == recordingID
+        else {
+            throw AudioExportError.publicationDoesNotBelongToRecording
+        }
         let audioURL = directoryURL.appendingPathComponent("Audio.m4a")
         let duration = try validate(audioURL: audioURL, expectedDuration: nil)
         return PublishedRecordingAudio(
@@ -119,6 +145,74 @@ public struct AudioExportService: Sendable {
             audioURL: audioURL,
             durationSeconds: duration
         )
+    }
+
+    public static func removePublicationMarker(
+        in directoryURL: URL,
+        recordingID: UUID
+    ) throws {
+        let markerURL = directoryURL.appendingPathComponent(publicationMarkerName)
+        guard let data = try? Data(contentsOf: markerURL),
+              let marker = try? JSONDecoder().decode(PublicationMarker.self, from: data),
+              marker.recordingID == recordingID
+        else { return }
+        try FileManager.default.removeItem(at: markerURL)
+    }
+
+    public static func publicationBelongs(
+        in directoryURL: URL,
+        to recordingID: UUID
+    ) -> Bool {
+        let markerURL = directoryURL.appendingPathComponent(publicationMarkerName)
+        guard let data = try? Data(contentsOf: markerURL),
+              let marker = try? JSONDecoder().decode(PublicationMarker.self, from: data)
+        else { return false }
+        return marker.version == 1 && marker.recordingID == recordingID
+    }
+
+    public static func cleanupStaleArtifacts(
+        in root: URL,
+        olderThan cutoff: Date
+    ) throws {
+        guard FileManager.default.fileExists(atPath: root.path) else { return }
+        let items = try FileManager.default.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [
+                .isDirectoryKey,
+                .isRegularFileKey,
+                .isSymbolicLinkKey,
+                .contentModificationDateKey,
+            ],
+            options: []
+        )
+        for item in items {
+            guard let values = try? item.resourceValues(forKeys: [
+                .isDirectoryKey,
+                .isRegularFileKey,
+                .isSymbolicLinkKey,
+                .contentModificationDateKey,
+            ]),
+                  values.isSymbolicLink != true,
+                  let modifiedAt = values.contentModificationDate,
+                  modifiedAt < cutoff
+            else { continue }
+            let name = item.lastPathComponent
+            let stagingIdentifier = name
+                .dropFirst(".call-recorder-".count)
+                .dropLast(".partial".count)
+            let isStagingDirectory = values.isDirectory == true &&
+                name.hasPrefix(".call-recorder-") && name.hasSuffix(".partial") &&
+                UUID(uuidString: String(stagingIdentifier)) != nil
+            let partialStem = name.dropLast(".partial".count)
+            let partialIdentifier = partialStem.split(separator: ".").last
+            let isTranscriptPartial = values.isRegularFile == true &&
+                name.hasPrefix(".call-recorder-") && name.hasSuffix(".partial") &&
+                name.localizedCaseInsensitiveContains(".md.") &&
+                partialIdentifier.flatMap { UUID(uuidString: String($0)) } != nil
+            if isStagingDirectory || isTranscriptPartial {
+                try FileManager.default.removeItem(at: item)
+            }
+        }
     }
 
     public func publicationDirectory(

@@ -102,16 +102,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateActivationPolicy() {
-        let hasOpenWindow = NSApplication.shared.windows.contains { window in
-            !(window is NSPanel) &&
-                window.canBecomeMain &&
-                (window.isVisible || window.isMiniaturized)
-        }
+        let application = NSApplication.shared
+        let hasOpenWindow = application.modalWindow?.isVisible == true ||
+            application.windows.contains { window in
+                !(window is NSPanel) &&
+                    window.canBecomeMain &&
+                    (window.isVisible || window.isMiniaturized)
+            }
         let policy: NSApplication.ActivationPolicy = hasOpenWindow ? .regular : .accessory
-        guard NSApplication.shared.activationPolicy() != policy else { return }
-        NSApplication.shared.setActivationPolicy(policy)
+        guard application.activationPolicy() != policy else { return }
+        application.setActivationPolicy(policy)
         if policy == .regular {
-            NSApplication.shared.activate(ignoringOtherApps: true)
+            application.activate(ignoringOtherApps: true)
         }
     }
 }

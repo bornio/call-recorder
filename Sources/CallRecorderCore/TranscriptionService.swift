@@ -20,63 +20,59 @@ public struct TranscriptionService: Sendable {
             throw DeepgramError.unreadableAudio
         }
 
+        let useRetainedResponse = store.expectsRetainedTranscriptResponse(for: recording)
         recording.transcriptionStatus = .transcribing
-        recording.transcriptionAttempts += 1
+        if !useRetainedResponse {
+            recording.transcriptionAttempts += 1
+        }
         recording.lastFailure = nil
         try store.save(recording)
 
         do {
-            let response = try await client.transcribe(
-                audioURL: audioURL,
-                language: recording.language,
-                apiKey: apiKey,
-                keyterms: recording.effectiveKeyterms
-            )
+            let response: Data
+            if useRetainedResponse {
+                guard let retained = try store.retainedTranscriptData(for: recording) else {
+                    throw TranscriptionServiceError.missingRetainedResponse
+                }
+                response = retained
+            } else {
+                guard !apiKey.isEmpty else {
+                    throw TranscriptionServiceError.missingCredential
+                }
+                response = try await client.transcribe(
+                    audioURL: audioURL,
+                    language: recording.language,
+                    apiKey: apiKey,
+                    keyterms: recording.effectiveKeyterms
+                )
+            }
+            let directory = try store.directory(for: recording)
+            let jsonURL = directory.appendingPathComponent("transcript.json")
+            if !useRetainedResponse {
+                try response.write(to: jsonURL, options: [.atomic])
+            }
+            recording.files.transcriptJSON = "transcript.json"
+            try store.save(recording)
             let document = try TranscriptDocument(deepgramResponse: response)
+
             let markdown = TranscriptMarkdownFormatter.format(
                 document: document,
                 recording: recording
             )
-            let directory = try store.directory(for: recording)
-            let jsonURL = directory.appendingPathComponent("transcript.json")
-            var markdownURL: URL
-            if let existingTranscript = recording.files.transcriptMarkdown {
-                markdownURL = try store.fileURL(for: existingTranscript, in: recording)
-            } else if recording.effectiveOrigin == .importedAudio {
-                let basename = audioURL.deletingPathExtension().lastPathComponent
-                let filename = basename == "Audio" ? "Transcript.md" : "\(basename).md"
-                markdownURL = audioURL.deletingLastPathComponent().appendingPathComponent(filename)
-            } else if let exportDirectory = recording.files.exportDirectory {
-                markdownURL = URL(fileURLWithPath: exportDirectory)
-                    .appendingPathComponent("Transcript.md")
-            } else {
-                markdownURL = directory.appendingPathComponent("Transcript.md")
-            }
-            if recording.effectiveOrigin == .importedAudio,
-               FileManager.default.fileExists(atPath: markdownURL.path) {
-                markdownURL = store.availableTranscriptURL(
-                    beside: audioURL,
-                    origin: .importedAudio
-                )
-                recording.files.transcriptMarkdown = markdownURL.path
-                recording.files.transcriptBookmark = nil
-                try store.save(recording)
-            }
-            try response.write(to: jsonURL, options: [.atomic])
+            var markdownURL = try preferredMarkdownURL(
+                for: recording,
+                audioURL: audioURL,
+                privateDirectory: directory,
+                store: store
+            )
+            markdownURL = store.availableURL(for: markdownURL)
             let markdownData = Data(markdown.utf8)
             while true {
                 do {
                     try AtomicFilePublisher.publishNewFile(markdownData, to: markdownURL)
                     break
-                } catch AtomicFilePublisherError.destinationExists
-                    where recording.effectiveOrigin == .importedAudio {
-                    markdownURL = store.availableTranscriptURL(
-                        beside: audioURL,
-                        origin: .importedAudio
-                    )
-                    recording.files.transcriptMarkdown = markdownURL.path
-                    recording.files.transcriptBookmark = nil
-                    try store.save(recording)
+                } catch AtomicFilePublisherError.destinationExists {
+                    markdownURL = store.availableURL(for: markdownURL)
                 }
             }
             try? FileManager.default.setAttributes(
@@ -87,7 +83,6 @@ public struct TranscriptionService: Sendable {
                 ofItemAtPath: markdownURL.path
             )
 
-            recording.files.transcriptJSON = "transcript.json"
             recording.files.transcriptMarkdown = markdownURL.path
             recording.files.transcriptBookmark = try? store.bookmark(for: markdownURL)
             recording.transcriptionStatus = .complete
@@ -95,8 +90,12 @@ public struct TranscriptionService: Sendable {
             try store.save(recording)
             return recording
         } catch is CancellationError {
-            recording.transcriptionStatus = .notStarted
-            recording.lastFailure = nil
+            recording.transcriptionStatus = .failed
+            recording.lastFailure = RecordingFailure(
+                stage: .transcription,
+                message: "Transcription was interrupted. Deepgram may already have processed the audio; retry manually if needed.",
+                occurredAt: now
+            )
             try store.save(recording)
             throw CancellationError()
         } catch {
@@ -118,13 +117,38 @@ public struct TranscriptionService: Sendable {
             throw transcriptionError
         }
     }
+
+    private func preferredMarkdownURL(
+        for recording: RecordingManifest,
+        audioURL: URL,
+        privateDirectory: URL,
+        store: RecordingStore
+    ) throws -> URL {
+        if let existingTranscript = recording.files.transcriptMarkdown {
+            return try store.fileURL(for: existingTranscript, in: recording)
+        }
+        if recording.effectiveOrigin == .importedAudio {
+            return store.transcriptURL(beside: audioURL, origin: .importedAudio)
+        }
+        if let exportDirectory = recording.files.exportDirectory {
+            return URL(fileURLWithPath: exportDirectory)
+                .appendingPathComponent("Transcript.md")
+        }
+        return privateDirectory.appendingPathComponent("Transcript.md")
+    }
 }
 
 public enum TranscriptionServiceError: LocalizedError, Sendable {
+    case missingCredential
+    case missingRetainedResponse
     case persistenceAfterFailure(transcription: String, persistence: String)
 
     public var errorDescription: String? {
         switch self {
+        case .missingCredential:
+            "Add a Deepgram API key before transcribing this recording."
+        case .missingRetainedResponse:
+            "The saved Deepgram response is missing or unreadable. Retry manually to upload the audio again."
         case .persistenceAfterFailure(let transcription, let persistence):
             "\(transcription) The failed status could not be saved: \(persistence)"
         }
