@@ -47,7 +47,10 @@ struct MenuBarLabelView: View {
         case .starting: "Call Recorder, starting recording"
         case .recording: "Recording, elapsed \(elapsed)"
         case .paused: "Recording paused, elapsed \(elapsed)"
-        case .stopping: "Saving recording, elapsed \(elapsed)"
+        case .stopping:
+            model.isCancelling
+                ? "Discarding recording, elapsed \(elapsed)"
+                : "Saving recording, elapsed \(elapsed)"
         }
     }
 
@@ -81,13 +84,20 @@ struct MenuBarLabelView: View {
 struct MenuContentView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             if model.isPreparingToTerminate {
                 TerminationContent(model: model)
             } else {
-                captureContent
+                ZStack(alignment: .topLeading) {
+                    captureContent
+                        .id(model.captureState)
+                        .transition(captureTransition)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .animation(captureAnimation, value: model.captureState)
             }
 
             if let issue = model.captureIssue {
@@ -175,6 +185,17 @@ struct MenuContentView: View {
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
 
+    private var captureTransition: AnyTransition {
+        if reduceMotion {
+            return .opacity
+        }
+        return .opacity.combined(with: .scale(scale: 0.97, anchor: .top))
+    }
+
+    private var captureAnimation: Animation {
+        .easeOut(duration: reduceMotion ? 0.1 : 0.2)
+    }
+
     private func confirmDiscard() {
         let alert = NSAlert()
         alert.messageText = "Discard this recording?"
@@ -230,7 +251,11 @@ private struct CaptureIssueView: View {
                 }
                 .controlSize(.small)
             case nil:
-                EmptyView()
+                Button("Dismiss") {
+                    model.dismissCaptureIssue()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
         }
     }
@@ -352,14 +377,17 @@ private struct ActiveCaptureContent: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                if model.captureStatistics.summary.totalDroppedFrames > 0 {
-                    Label("Audio may contain gaps", systemImage: "exclamationmark.triangle")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
             }
             .opacity(isPaused ? 0.4 : 1)
             .accessibilityHidden(isPaused)
+
+            if droppedFrames > 0 {
+                Label("Audio may contain gaps", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .help("\(droppedFrames) audio frames were dropped during this recording.")
+                    .accessibilityValue("\(droppedFrames) audio frames dropped")
+            }
 
             HStack {
                 Button {
@@ -392,6 +420,10 @@ private struct ActiveCaptureContent: View {
                 .controlSize(.small)
                 .tint(.red)
         }
+    }
+
+    private var droppedFrames: UInt64 {
+        model.captureStatistics.summary.totalDroppedFrames
     }
 }
 
@@ -510,6 +542,9 @@ private struct BackgroundRecordingSummary: View {
                     recording.transcriptionStatus == .transcribing {
             ProgressView()
                 .controlSize(.small)
+        } else if recording.captureHealthSummary != nil {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
         } else if recording.transcriptionStatus == .complete {
             Image(systemName: "checkmark.circle")
                 .foregroundStyle(.green)
@@ -549,12 +584,18 @@ private struct BackgroundRecordingSummary: View {
 
     private var detail: String {
         if recording.transcriptionStatus == .waitingForCredential {
+            if let captureHealthSummary = recording.captureHealthSummary {
+                return "\(captureHealthSummary) Add a key to transcribe."
+            }
             return "Add a key to start transcription."
         }
         if recording.lastFailure != nil ||
             recording.captureStatus == .failed ||
             recording.transcriptionStatus == .failed {
             return "Open Recordings for details."
+        }
+        if let captureHealthSummary = recording.captureHealthSummary {
+            return captureHealthSummary
         }
         if case .finishingAudio = activeActivity {
             return "Finishing the audio file. You can record again."

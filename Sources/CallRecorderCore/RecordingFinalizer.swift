@@ -258,15 +258,33 @@ public struct RecordingFinalizer: Sendable {
         else {
             throw RecordingFinalizerError.unsupportedCaptureChunk(url.lastPathComponent)
         }
-        let capacity = AVAudioFrameCount(file.length)
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity) else {
+        let expectedFrameCount = Int(file.length)
+        let bufferCapacity = AVAudioFrameCount(min(expectedFrameCount, 65_536))
+        guard let buffer = AVAudioPCMBuffer(
+            pcmFormat: format,
+            frameCapacity: bufferCapacity
+        ) else {
             throw RecordingFinalizerError.unsupportedCaptureChunk(url.lastPathComponent)
         }
-        try file.read(into: buffer)
-        guard let channel = buffer.floatChannelData?[0] else {
-            throw RecordingFinalizerError.unsupportedCaptureChunk(url.lastPathComponent)
+
+        var samples: [Float] = []
+        samples.reserveCapacity(expectedFrameCount)
+        while samples.count < expectedFrameCount {
+            let remaining = AVAudioFrameCount(expectedFrameCount - samples.count)
+            buffer.frameLength = 0
+            try file.read(into: buffer, frameCount: min(buffer.frameCapacity, remaining))
+            guard buffer.frameLength > 0 else { break }
+            guard let channel = buffer.floatChannelData?[0] else {
+                throw RecordingFinalizerError.unsupportedCaptureChunk(url.lastPathComponent)
+            }
+            samples.append(
+                contentsOf: UnsafeBufferPointer(
+                    start: channel,
+                    count: Int(buffer.frameLength)
+                )
+            )
         }
-        return Array(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
+        return samples
     }
 
     private func linearResample(_ input: [Float], outputCount: Int) -> [Float] {

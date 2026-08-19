@@ -4,6 +4,47 @@ import Foundation
 @testable import CallRecorderCore
 
 func runRecordingFinalizerTests() throws {
+    try runTest("finalizer reads valid partial CAF reads through end of file") {
+        try withFinalizerTemporaryDirectory { root in
+            let systemDirectory = root.appendingPathComponent("system", isDirectory: true)
+            let microphoneDirectory = root.appendingPathComponent("microphone", isDirectory: true)
+            try FileManager.default.createDirectory(at: systemDirectory, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: microphoneDirectory, withIntermediateDirectories: true)
+
+            let origin = AudioGetCurrentHostTime()
+            let frames: AVAudioFrameCount = 720_384
+            try writeChunk(
+                directory: systemDirectory,
+                filename: "000000.caf",
+                sample: 0,
+                frames: frames,
+                firstHostTime: origin,
+                tailSample: 0.75,
+                tailFrames: 512
+            )
+            try writeChunk(
+                directory: microphoneDirectory,
+                filename: "000000.caf",
+                sample: 0,
+                frames: frames,
+                firstHostTime: origin
+            )
+
+            let output = root.appendingPathComponent("audio.wav")
+            let result = try RecordingFinalizer().finalize(
+                recordingDirectory: root,
+                systemCaptureDirectory: systemDirectory,
+                microphoneCaptureDirectory: microphoneDirectory,
+                outputURL: output
+            )
+
+            try expectEqual(result.warnings, [])
+            let wav = try Data(contentsOf: output)
+            let finalSystemSample = sample(in: wav, frame: Int(frames) - 1, channel: 0)
+            try expect(abs(Double(finalSystemSample) / Double(Int16.max) - 0.75) < 0.01)
+        }
+    }
+
     try runTest("sources align into remote-left and local-microphone-right WAV channels") {
         try withFinalizerTemporaryDirectory { root in
             let systemDirectory = root.appendingPathComponent("system", isDirectory: true)
@@ -153,7 +194,9 @@ private func writeChunk(
     filename: String,
     sample: Float,
     frames: AVAudioFrameCount,
-    firstHostTime: UInt64
+    firstHostTime: UInt64,
+    tailSample: Float? = nil,
+    tailFrames: AVAudioFrameCount = 0
 ) throws {
     let url = directory.appendingPathComponent(filename)
     let format = AVAudioFormat(
@@ -171,8 +214,13 @@ private func writeChunk(
         )
         let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames)!
         buffer.frameLength = frames
+        let tailStart = Int(frames - min(frames, tailFrames))
         for index in 0..<Int(frames) {
-            buffer.floatChannelData![0][index] = sample
+            buffer.floatChannelData![0][index] = if let tailSample, index >= tailStart {
+                tailSample
+            } else {
+                sample
+            }
         }
         try file.write(from: buffer)
     }

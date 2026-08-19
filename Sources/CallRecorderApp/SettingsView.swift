@@ -53,6 +53,7 @@ struct SettingsView: View {
                         Text(model.outputDirectory.path)
                             .lineLimit(1)
                             .truncationMode(.middle)
+                            .help(model.outputDirectory.path)
                         Button("Choose…") { model.chooseOutputDirectory() }
                             .disabled(!model.canChangeCaptureConfiguration)
                     }
@@ -68,10 +69,20 @@ struct SettingsView: View {
             }
 
             Section("Transcription accuracy") {
+                if !model.canChangeCaptureConfiguration {
+                    Label(
+                        "Stop recording to change these settings.",
+                        systemImage: "lock.fill"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+
                 Toggle(
                     "Improve names and jargon (paid Deepgram add-on)",
                     isOn: $model.keytermPromptingEnabled
                 )
+                .disabled(!model.canChangeCaptureConfiguration)
 
                 if model.keytermPromptingEnabled {
                     Text("Enter one name, company, product, acronym, or phrase per line.")
@@ -83,6 +94,7 @@ struct SettingsView: View {
                         axis: .vertical
                     )
                     .lineLimit(3...6)
+                    .disabled(!model.canChangeCaptureConfiguration)
 
                     if model.keytermsAreLimited {
                         Label(

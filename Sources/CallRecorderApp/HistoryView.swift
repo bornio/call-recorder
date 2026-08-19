@@ -10,19 +10,31 @@ struct HistoryView: View {
     var body: some View {
         ZStack {
             if model.recordings.isEmpty {
-                ContentUnavailableView {
-                    Label("No Recordings", systemImage: "waveform")
-                } description: {
-                    Text("Finished calls and imported transcripts will appear here.")
-                } actions: {
-                    Button {
-                        model.chooseAudioForTranscription()
-                    } label: {
-                        Label("Transcribe Audio…", systemImage: "waveform.badge.plus")
+                if model.isRefreshingHistory {
+                    ContentUnavailableView {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Checking Recordings…")
+                        }
+                    } description: {
+                        Text("Checking Finder for recordings and transcripts.")
                     }
-                    .disabled(!model.canImportAudio)
-                    .help(model.importUnavailableReason ?? "Transcribe an audio file")
-                    .accessibilityHint(model.importUnavailableReason ?? "Choose an audio file to transcribe")
+                } else {
+                    ContentUnavailableView {
+                        Label("No Recordings", systemImage: "waveform")
+                    } description: {
+                        Text("Finished calls and imported transcripts will appear here.")
+                    } actions: {
+                        Button {
+                            model.chooseAudioForTranscription()
+                        } label: {
+                            Label("Transcribe Audio…", systemImage: "waveform.badge.plus")
+                        }
+                        .disabled(!model.canImportAudio)
+                        .help(model.importUnavailableReason ?? "Transcribe an audio file")
+                        .accessibilityHint(model.importUnavailableReason ?? "Choose an audio file to transcribe")
+                    }
                 }
             } else {
                 List(model.recordings) { recording in
@@ -51,6 +63,20 @@ struct HistoryView: View {
         .frame(minWidth: 620)
         .toolbar {
             Button {
+                model.refreshHistoryFromFinder()
+            } label: {
+                if model.isRefreshingHistory {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityLabel("Checking Finder for recording changes")
+                } else {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+            }
+            .disabled(!model.canRefreshHistory)
+            .help(model.historyRefreshUnavailableReason ?? "Check Finder for recording changes")
+
+            Button {
                 model.chooseAudioForTranscription()
             } label: {
                 if model.isImportingAudio {
@@ -72,7 +98,11 @@ struct HistoryView: View {
         } isTargeted: { targeted in
             isDropTargeted = targeted && model.canImportAudio
         }
-        .onAppear { model.refreshHistoryFromFinder() }
+        .onAppear {
+            model.setHistoryPresented(true)
+            model.refreshHistoryFromFinder()
+        }
+        .onDisappear { model.setHistoryPresented(false) }
         .alert(
             "Unable to complete action",
             isPresented: Binding(
@@ -85,21 +115,21 @@ struct HistoryView: View {
             Text(model.historyErrorMessage ?? "Unknown error")
         }
         .alert(
-            "Delete recording?",
+            deletionAlertTitle,
             isPresented: Binding(
                 get: { pendingDeletion != nil },
                 set: { if !$0 { pendingDeletion = nil } }
             ),
             presenting: pendingDeletion
         ) { recording in
-            Button("Delete", role: .destructive) {
+            Button(deletionActionTitle(for: recording), role: .destructive) {
                 model.delete(recording)
                 pendingDeletion = nil
             }
             Button("Cancel", role: .cancel) { pendingDeletion = nil }
         } message: { recording in
             if recording.effectiveOrigin == .importedAudio {
-                Text("This removes the item from app history. Any source audio or transcript files remain in Finder.")
+                Text("This removes the item and its private data from app history. Source audio and transcript files remain in Finder.")
             } else {
                 Text("This removes app history and permanently deletes Finder files only when Call Recorder can verify that it created them.")
             }
@@ -121,6 +151,19 @@ struct HistoryView: View {
             Text("This starts a new paid Deepgram request. The prior request may already have been billed.")
         }
     }
+
+    private var deletionAlertTitle: String {
+        guard let pendingDeletion else { return "Delete recording?" }
+        return pendingDeletion.effectiveOrigin == .importedAudio
+            ? "Remove from history?"
+            : "Delete recording?"
+    }
+
+    private func deletionActionTitle(for recording: RecordingManifest) -> String {
+        recording.effectiveOrigin == .importedAudio
+            ? "Remove from History"
+            : "Delete Recording"
+    }
 }
 
 private struct RecordingRow: View {
@@ -135,13 +178,19 @@ private struct RecordingRow: View {
                 .frame(width: 18)
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(recording.displayTitle)
+                Text(rowTitle)
                     .font(.headline)
                     .lineLimit(1)
-                Text("\(recording.statusText) · \(recording.language.displayName)")
+                if recording.effectiveOrigin == .importedAudio {
+                    Text("\(recording.displayTitle) · \(recording.language.displayName)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Text(statusSummary)
                     .font(.caption)
                     .foregroundStyle(statusIsFailure ? .red : .secondary)
-                    .lineLimit(1)
+                    .lineLimit(2)
                 if let failure = recording.lastFailure {
                     Text(failure.message)
                         .font(.caption)
@@ -149,7 +198,13 @@ private struct RecordingRow: View {
                         .lineLimit(2)
                         .help(failure.message)
                 }
-                let recoveryBytes = model.recoveryBytes(for: recording)
+                if let captureHealthSummary = recording.captureHealthSummary {
+                    Label(captureHealthSummary, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .lineLimit(2)
+                        .help(captureHealthSummary)
+                }
                 if recoveryBytes > 0 {
                     Label(
                         "\(ByteCountFormatter.string(fromByteCount: recoveryBytes, countStyle: .file)) recovery audio retained",
@@ -221,7 +276,7 @@ private struct RecordingRow: View {
                         if hasNonDeleteActions {
                             Divider()
                         }
-                        Button("Delete", role: .destructive) {
+                        Button(deletionMenuTitle, role: .destructive) {
                             pendingDeletion = recording
                         }
                     }
@@ -230,7 +285,7 @@ private struct RecordingRow: View {
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
-                .accessibilityLabel("More actions for \(recording.displayTitle)")
+                .accessibilityLabel("More actions for \(rowTitle)")
                 .help("More actions")
             }
         }
@@ -244,6 +299,29 @@ private struct RecordingRow: View {
             recording.transcriptionStatus == .failed
     }
 
+    private var recoveryBytes: Int64 {
+        model.recoveryBytes(for: recording)
+    }
+
+    private var rowTitle: String {
+        guard recording.effectiveOrigin == .importedAudio else {
+            return recording.displayTitle
+        }
+        guard let filename = recording.importedSourceFilename else {
+            return "Imported audio"
+        }
+        return "Imported · \(filename)"
+    }
+
+    private var statusSummary: String {
+        let audio = recording.audioStatusText(hasRecoveryAudio: recoveryBytes > 0)
+        let transcript = recording.transcriptStatusText
+        let language = recording.effectiveOrigin == .importedAudio
+            ? ""
+            : " · \(recording.language.displayName)"
+        return "Audio: \(audio) · Transcript: \(transcript)\(language)"
+    }
+
     private var hasNonDeleteActions: Bool {
         recording.files.audio != nil ||
             (recording.transcriptionStatus == .complete &&
@@ -252,6 +330,12 @@ private struct RecordingRow: View {
 
     private var hasMenuActions: Bool {
         hasNonDeleteActions || model.canDelete(recording)
+    }
+
+    private var deletionMenuTitle: String {
+        recording.effectiveOrigin == .importedAudio
+            ? "Remove from History…"
+            : "Delete Recording…"
     }
 
     private var retryHelp: String {
@@ -298,7 +382,15 @@ private struct RecordingStatusSymbol: View {
                     recording.transcriptionStatus == .transcribing {
             ProgressView()
                 .controlSize(.small)
-                .accessibilityLabel(recording.statusText)
+                .accessibilityLabel(
+                    recording.captureStatus == .processing
+                        ? "Finishing audio"
+                        : "Transcribing"
+                )
+        } else if recording.captureHealthSummary != nil {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .accessibilityLabel("Recording audio may need attention")
         } else if recording.transcriptionStatus == .complete {
             Image(systemName: "checkmark.circle")
                 .foregroundStyle(.green)
@@ -306,7 +398,7 @@ private struct RecordingStatusSymbol: View {
         } else {
             Image(systemName: "clock")
                 .foregroundStyle(.secondary)
-                .accessibilityLabel(recording.statusText)
+                .accessibilityLabel(recording.transcriptStatusText)
         }
     }
 }

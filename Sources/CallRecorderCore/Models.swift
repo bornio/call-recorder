@@ -197,6 +197,14 @@ public struct RecordingManifest: Codable, Equatable, Identifiable, Sendable {
         (captureStartedAt ?? createdAt).formatted(date: .abbreviated, time: .shortened)
     }
 
+    public var importedSourceFilename: String? {
+        guard effectiveOrigin == .importedAudio,
+              let audioPath = files.audio
+        else { return nil }
+        let filename = URL(fileURLWithPath: audioPath).lastPathComponent
+        return filename.isEmpty ? nil : filename
+    }
+
     public var effectiveOrigin: RecordingOrigin {
         origin ?? .nativeRecording
     }
@@ -228,17 +236,57 @@ public struct RecordingManifest: Codable, Equatable, Identifiable, Sendable {
         DeepgramKeyterms.limited(keyterms ?? [])
     }
 
-    public var statusText: String {
-        if captureStatus == .recording { return "Recording" }
-        if captureStatus == .processing { return "Finishing audio" }
-        if captureStatus == .failed { return "Capture failed" }
-        switch transcriptionStatus {
-        case .notStarted: return "Waiting to transcribe"
-        case .waitingForCredential: return "Needs Deepgram key"
-        case .transcribing: return "Transcribing"
-        case .complete: return "Transcript ready"
-        case .failed: return "Transcription failed"
+    public func audioStatusText(hasRecoveryAudio: Bool) -> String {
+        switch captureStatus {
+        case .recording:
+            return "Recording"
+        case .processing:
+            return "Finishing"
+        case .complete:
+            return files.audio == nil ? "Unavailable" : "Saved"
+        case .failed:
+            if files.audio != nil { return "Saved with errors" }
+            return hasRecoveryAudio ? "Recovery retained" : "Failed"
         }
+    }
+
+    public var transcriptStatusText: String {
+        switch transcriptionStatus {
+        case .notStarted: return "Waiting"
+        case .waitingForCredential: return "Needs key"
+        case .transcribing: return "Transcribing"
+        case .complete: return "Ready"
+        case .failed: return "Failed"
+        }
+    }
+
+    public var captureHealthSummary: String? {
+        var messages: [String] = []
+        let droppedFrames = captureSummary.totalDroppedFrames
+        if droppedFrames > 0 {
+            let frameDescription = droppedFrames == 1
+                ? "1 audio frame was"
+                : "\(droppedFrames) audio frames were"
+            messages.append("\(frameDescription) dropped. Audio may contain gaps.")
+        }
+
+        if let before = routeBefore, let after = routeAfter {
+            switch (
+                before.defaultInputDevice != after.defaultInputDevice,
+                before.defaultOutputDevice != after.defaultOutputDevice
+            ) {
+            case (true, true):
+                messages.append("The default microphone and output device changed during recording.")
+            case (true, false):
+                messages.append("The default microphone changed during recording.")
+            case (false, true):
+                messages.append("The default output device changed during recording.")
+            case (false, false):
+                break
+            }
+        }
+
+        return messages.isEmpty ? nil : messages.joined(separator: " ")
     }
 }
 

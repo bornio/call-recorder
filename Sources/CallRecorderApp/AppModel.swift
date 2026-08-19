@@ -126,6 +126,7 @@ final class AppModel: ObservableObject {
     private var capturePollTask: Task<Void, Never>?
     private var fatalStopRequested = false
     private var isMenuPresented = false
+    private var isHistoryPresented = false
     private var terminationCompletion: (@MainActor () -> Void)?
     @Published private var recoverableCaptureIDs: Set<UUID> = []
     @Published private var pendingFinalizationEligibilityIDs: Set<UUID> = []
@@ -160,6 +161,30 @@ final class AppModel: ObservableObject {
             !isRefreshingHistory &&
             captureState == .ready &&
             !isImportingAudio
+    }
+
+    var canRefreshHistory: Bool {
+        !isPreparingToTerminate &&
+            !isForgettingHistory &&
+            !isRefreshingHistory &&
+            !isPerformingStartupCleanup &&
+            !isImportingAudio &&
+            captureState == .ready &&
+            backgroundActivity == nil &&
+            pendingRecordingCount == 0
+    }
+
+    var historyRefreshUnavailableReason: String? {
+        if isRefreshingHistory { return "Checking Finder for changes." }
+        if isPreparingToTerminate { return "Unavailable while the app is preparing to quit." }
+        if isForgettingHistory { return "Available after private history is removed." }
+        if isPerformingStartupCleanup { return "Available after startup cleanup finishes." }
+        if isImportingAudio { return "Available after the selected audio finishes importing." }
+        if captureState != .ready { return "Available after the current recording ends." }
+        if backgroundActivity != nil || pendingRecordingCount > 0 {
+            return "Available after recordings finish processing."
+        }
+        return nil
     }
 
     var importUnavailableReason: String? {
@@ -308,6 +333,7 @@ final class AppModel: ObservableObject {
             refreshStorageUsage()
             if let recordingID = activity?.recordingID,
                !isMenuPresented,
+               !isHistoryPresented,
                recordings.first(where: { $0.id == recordingID })?.transcriptionStatus == .complete {
                 unseenTranscriptCompletionID = recordingID
             }
@@ -366,11 +392,7 @@ final class AppModel: ObservableObject {
     }
 
     func refreshHistoryFromFinder() {
-        guard !isRefreshingHistory else { return }
-        guard backgroundActivity == nil, pendingRecordingCount == 0 else {
-            reloadHistory()
-            return
-        }
+        guard canRefreshHistory else { return }
         isRefreshingHistory = true
         let store = self.store
         Task {
@@ -409,7 +431,7 @@ final class AppModel: ObservableObject {
                $0.id == unseenTranscriptCompletionID &&
                    $0.transcriptionStatus == .complete
            }) {
-            self.unseenTranscriptCompletionID = nil
+            acknowledgeTranscriptCompletion()
         }
         eligibilityGeneration += 1
         let generation = eligibilityGeneration
@@ -512,11 +534,22 @@ final class AppModel: ObservableObject {
     func setMenuPresented(_ presented: Bool) {
         isMenuPresented = presented
         if presented {
-            unseenTranscriptCompletionID = nil
+            acknowledgeTranscriptCompletion()
         }
         if presented, isCaptureActive, let captureEngine {
             captureStatistics = captureEngine.statistics()
         }
+    }
+
+    func setHistoryPresented(_ presented: Bool) {
+        isHistoryPresented = presented
+        if presented {
+            acknowledgeTranscriptCompletion()
+        }
+    }
+
+    func dismissCaptureIssue() {
+        captureIssue = nil
     }
 
     func handleSystemSleep() {
@@ -1365,6 +1398,10 @@ final class AppModel: ObservableObject {
         let completion = terminationCompletion
         terminationCompletion = nil
         completion?()
+    }
+
+    private func acknowledgeTranscriptCompletion() {
+        unseenTranscriptCompletionID = nil
     }
 
     private func requestMicrophoneAccess() async -> Bool {

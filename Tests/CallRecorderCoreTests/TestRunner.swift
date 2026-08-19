@@ -62,6 +62,7 @@ struct CallRecorderTestRunner {
         do {
             try runCaptureSessionStateMachineTests()
             try runAudioDeviceSelectionTests()
+            try runRecordingPresentationTests()
             try runRecordingStoreTests()
             try runDeepgramAndTranscriptTests()
             try runRecordingFinalizerTests()
