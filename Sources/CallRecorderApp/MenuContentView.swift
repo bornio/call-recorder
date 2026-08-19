@@ -115,25 +115,39 @@ struct MenuContentView: View {
             }
 
             Divider()
-            HStack(spacing: 8) {
-                Button { showRecordings() } label: {
-                    Label("Recordings", systemImage: "tray.full")
+            VStack(spacing: 8) {
+                HStack(spacing: 8) {
+                    Button { showRecordings() } label: {
+                        Label("Recordings", systemImage: "tray.full")
+                    }
+                    .buttonStyle(.bordered)
+                    SettingsLink {
+                        Label("Settings", systemImage: "gearshape")
+                    }
+                    .buttonStyle(.bordered)
+                    Spacer()
+                    Button {
+                        NSApplication.shared.terminate(nil)
+                    } label: {
+                        Label("Quit", systemImage: "power")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(model.isPreparingToTerminate)
                 }
-                .buttonStyle(.bordered)
-                SettingsLink {
-                    Label("Settings", systemImage: "gearshape")
+
+                Button(action: showAbout) {
+                    Text(aboutButtonTitle)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.bordered)
-                Spacer()
-                Button {
-                    NSApplication.shared.terminate(nil)
-                } label: {
-                    Label("Quit", systemImage: "power")
-                }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
                 .disabled(model.isPreparingToTerminate)
+                .help("About Call Recorder")
+                .accessibilityLabel(aboutAccessibilityLabel)
+                .accessibilityHint("Shows app version and build information")
             }
             .controlSize(.small)
+            .frame(maxWidth: .infinity)
         }
         .padding(16)
         .frame(width: 360)
@@ -183,6 +197,41 @@ struct MenuContentView: View {
     private func showRecordings() {
         openWindow(id: "recordings")
         NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    private func showAbout() {
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        NSApplication.shared.orderFrontStandardAboutPanel(nil)
+    }
+
+    private var applicationVersion: String? {
+        guard let version = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String,
+              !version.isEmpty
+        else { return nil }
+        return version
+    }
+
+    private var applicationBuild: String? {
+        guard let build = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleVersion"
+        ) as? String,
+              !build.isEmpty
+        else { return nil }
+        return build
+    }
+
+    private var aboutButtonTitle: String {
+        applicationVersion.map { "Call Recorder \($0)" } ?? "About Call Recorder"
+    }
+
+    private var aboutAccessibilityLabel: String {
+        guard let applicationVersion else { return "About Call Recorder" }
+        guard let applicationBuild else {
+            return "About Call Recorder, version \(applicationVersion)"
+        }
+        return "About Call Recorder, version \(applicationVersion), build \(applicationBuild)"
     }
 
     private var captureTransition: AnyTransition {
