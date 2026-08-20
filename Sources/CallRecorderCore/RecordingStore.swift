@@ -30,6 +30,16 @@ public struct RecordingStorageUsage: Equatable, Sendable {
     public static let zero = RecordingStorageUsage()
 }
 
+public struct TranscriptFileFingerprint: Equatable, Hashable, Sendable {
+    public var byteCount: Int64
+    public var modificationDate: Date
+
+    public init(byteCount: Int64, modificationDate: Date) {
+        self.byteCount = byteCount
+        self.modificationDate = modificationDate
+    }
+}
+
 private enum ExternalFileResolution {
     case available(URL)
     case missing
@@ -140,13 +150,8 @@ public struct RecordingStore: Sendable {
             guard !fileManager.fileExists(
                 atPath: directory.appendingPathComponent(Self.discardMarkerName).path
             ) else { continue }
-            let manifestURL = directory.appendingPathComponent("manifest.json")
-            if let data = try? Data(contentsOf: manifestURL),
-               let manifest = try? Self.decoder.decode(RecordingManifest.self, from: data),
-               manifest.version == RecordingManifest.currentVersion {
+            if let manifest = manifestOrRecovery(in: directory) {
                 recordings.append(manifest)
-            } else if let recoveryManifest = recoveryManifest(for: directory) {
-                recordings.append(recoveryManifest)
             }
         }
         return recordings.sorted { $0.createdAt > $1.createdAt }
@@ -156,15 +161,7 @@ public struct RecordingStore: Sendable {
         guard let directory = try findRecordingDirectory(id: id) else {
             throw RecordingStoreError.missingManifest(id)
         }
-        let manifestURL = directory.appendingPathComponent("manifest.json")
-        if let data = try? Data(contentsOf: manifestURL),
-           let manifest = try? Self.decoder.decode(RecordingManifest.self, from: data),
-           manifest.version == RecordingManifest.currentVersion {
-            return manifest
-        }
-        if let recovery = recoveryManifest(for: directory) {
-            return recovery
-        }
+        if let manifest = manifestOrRecovery(in: directory) { return manifest }
         throw RecordingStoreError.missingManifest(id)
     }
 
@@ -393,6 +390,25 @@ public struct RecordingStore: Sendable {
         return try Data(contentsOf: url)
     }
 
+    public func retainedTranscriptFingerprint(
+        for manifest: RecordingManifest
+    ) throws -> TranscriptFileFingerprint? {
+        let url = try directory(for: manifest).appendingPathComponent("transcript.json")
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
+        let values = try url.resourceValues(
+            forKeys: [.fileSizeKey, .contentModificationDateKey]
+        )
+        return TranscriptFileFingerprint(
+            byteCount: Int64(values.fileSize ?? 0),
+            modificationDate: values.contentModificationDate ?? .distantPast
+        )
+    }
+
+    public func transcriptDocument(for manifest: RecordingManifest) throws -> TranscriptDocument? {
+        guard let data = try retainedTranscriptData(for: manifest) else { return nil }
+        return try TranscriptDocument(deepgramResponse: data)
+    }
+
     public func expectsRetainedTranscriptResponse(for manifest: RecordingManifest) -> Bool {
         if manifest.files.transcriptJSON != nil { return true }
         guard let directory = try? directory(for: manifest) else { return false }
@@ -513,16 +529,13 @@ public struct RecordingStore: Sendable {
     }
 
     public func hasClosedCaptureMetadata(for manifest: RecordingManifest) -> Bool {
-        guard let directory = try? directory(for: manifest) else { return false }
-        return ["capture/system", "capture/microphone"].allSatisfy { relativePath in
-            hasRecoverableCapture(in: directory.appendingPathComponent(relativePath))
-        }
+        guard let directories = captureDirectories(for: manifest) else { return false }
+        return directories.allSatisfy(hasRecoverableCapture(in:))
     }
 
     private func hasAnyCaptureMaterial(for manifest: RecordingManifest) -> Bool {
-        guard let directory = try? directory(for: manifest) else { return false }
-        for relativePath in ["capture/system", "capture/microphone"] {
-            let captureDirectory = directory.appendingPathComponent(relativePath)
+        guard let directories = captureDirectories(for: manifest) else { return false }
+        for captureDirectory in directories {
             guard let enumerator = fileManager.enumerator(
                 at: captureDirectory,
                 includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
@@ -610,12 +623,12 @@ public struct RecordingStore: Sendable {
     }
 
     private func resolveBookmark(_ data: Data) -> URL? {
-        var stale = false
+        var ignoredStaleness = false
         return try? URL(
             resolvingBookmarkData: data,
             options: [.withoutUI, .withoutMounting],
             relativeTo: nil,
-            bookmarkDataIsStale: &stale
+            bookmarkDataIsStale: &ignoredStaleness
         ).standardizedFileURL
     }
 
@@ -685,22 +698,9 @@ public struct RecordingStore: Sendable {
 
     private func hasRecoverableCapture(in directory: URL) -> Bool {
         let metadataURL = directory.appendingPathComponent("chunks.jsonl")
-        guard let data = try? Data(contentsOf: metadataURL) else { return false }
-        let completeData: Data
-        if data.last == 0x0a {
-            completeData = data
-        } else if let lastNewline = data.lastIndex(of: 0x0a) {
-            completeData = Data(data.prefix(through: lastNewline))
-        } else {
+        guard let chunks = try? CaptureMetadataReader.read(from: metadataURL) else {
             return false
         }
-        let decoder = JSONDecoder()
-        guard let chunks = try? completeData
-            .split(separator: 0x0a, omittingEmptySubsequences: true)
-            .map({ try decoder.decode(CaptureChunk.self, from: Data($0)) }),
-              !chunks.isEmpty,
-              chunks.allSatisfy(\.isValid)
-        else { return false }
         return chunks.allSatisfy { chunk in
             let url = directory.appendingPathComponent(chunk.file)
             guard fileManager.isReadableFile(atPath: url.path),
@@ -712,6 +712,26 @@ public struct RecordingStore: Sendable {
                 values.isSymbolicLink != true &&
                 (values.fileSize ?? 0) > 0
         }
+    }
+
+    private func captureDirectories(for manifest: RecordingManifest) -> [URL]? {
+        guard let system = try? url(for: manifest.files.systemCaptureDirectory, in: manifest),
+              let microphone = try? url(
+                  for: manifest.files.microphoneCaptureDirectory,
+                  in: manifest
+              )
+        else { return nil }
+        return [system, microphone]
+    }
+
+    private func manifestOrRecovery(in directory: URL) -> RecordingManifest? {
+        let manifestURL = directory.appendingPathComponent("manifest.json")
+        if let data = try? Data(contentsOf: manifestURL),
+           let manifest = try? Self.decoder.decode(RecordingManifest.self, from: data),
+           manifest.version == RecordingManifest.currentVersion {
+            return manifest
+        }
+        return recoveryManifest(for: directory)
     }
 
     public func transcriptURL(beside audioURL: URL, origin: RecordingOrigin) -> URL {

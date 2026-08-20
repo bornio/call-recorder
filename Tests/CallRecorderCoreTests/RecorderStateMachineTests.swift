@@ -1,5 +1,6 @@
 @testable import CallRecorderCore
 
+@MainActor
 func runCaptureSessionStateMachineTests() throws {
     try runTest("capture starts and returns to ready before post-processing") {
         var machine = CaptureSessionStateMachine()
@@ -32,7 +33,14 @@ func runCaptureSessionStateMachineTests() throws {
 
     try runTest("stop is rejected when nothing is recording") {
         var machine = CaptureSessionStateMachine()
-        try expectThrows { try machine.transition(.stopRequested) }
+        try expectThrows(
+            CaptureSessionStateError.self,
+            matching: {
+                $0 == .invalidTransition(from: .ready, event: .stopRequested)
+            }
+        ) {
+            try machine.transition(.stopRequested)
+        }
         try expectEqual(machine.state, .ready)
     }
 }

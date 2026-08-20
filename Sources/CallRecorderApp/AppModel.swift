@@ -15,6 +15,46 @@ private struct CancelOutcome: Sendable {
     var deletionErrorMessage: String?
 }
 
+private struct TranscriptCacheEntry: Equatable, Sendable {
+    var fingerprint: TranscriptFileFingerprint?
+    var document: TranscriptDocument?
+}
+
+private actor TranscriptDocumentLoader {
+    private var entries: [UUID: TranscriptCacheEntry] = [:]
+
+    func retainOnly(_ recordingIDs: Set<UUID>) {
+        entries = entries.filter { recordingIDs.contains($0.key) }
+    }
+
+    func load(
+        _ recording: RecordingManifest,
+        from store: RecordingStore
+    ) -> TranscriptCacheEntry? {
+        for _ in 0..<2 {
+            guard !Task.isCancelled else { return nil }
+            let fingerprint = try? store.retainedTranscriptFingerprint(for: recording)
+            if let cached = entries[recording.id],
+               cached.fingerprint == fingerprint {
+                return cached
+            }
+            let document = fingerprint == nil
+                ? nil
+                : try? store.transcriptDocument(for: recording)
+            guard !Task.isCancelled else { return nil }
+            let finalFingerprint = try? store.retainedTranscriptFingerprint(for: recording)
+            guard fingerprint == finalFingerprint else { continue }
+            let entry = TranscriptCacheEntry(
+                fingerprint: fingerprint,
+                document: document
+            )
+            entries[recording.id] = entry
+            return entry
+        }
+        return nil
+    }
+}
+
 struct CaptureIssue {
     enum Recovery {
         case appSettings
@@ -30,6 +70,55 @@ enum DeepgramCredentialSource: Equatable {
     case none
     case keychain
     case environment
+}
+
+private enum DevelopmentCredentialAccessError: LocalizedError, Sendable {
+    case persistenceDisabled
+
+    var errorDescription: String? {
+        "Keychain storage is disabled in development builds."
+    }
+}
+
+private struct DeepgramCredentialAccess: Sendable {
+    let supportsPersistence: Bool
+    let resolvedAPIKey: @Sendable () throws -> String?
+    let storedAPIKey: @Sendable () throws -> String?
+    let saveAPIKey: @Sendable (String) throws -> Void
+    let removeAPIKey: @Sendable () throws -> Void
+
+    static func keychainBacked() -> Self {
+        let keychain = KeychainStore()
+        return Self(
+            supportsPersistence: true,
+            resolvedAPIKey: { try keychain.resolvedDeepgramAPIKey() },
+            storedAPIKey: { try keychain.deepgramAPIKey() },
+            saveAPIKey: { try keychain.saveDeepgramAPIKey($0) },
+            removeAPIKey: { try keychain.deleteDeepgramAPIKey() }
+        )
+    }
+
+    static var keychainFreeDevelopment: Self {
+        Self(
+            supportsPersistence: false,
+            resolvedAPIKey: {
+                let value = ProcessInfo.processInfo.environment["DEEPGRAM_API_KEY"]?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return value?.isEmpty == false ? value : nil
+            },
+            storedAPIKey: { nil },
+            saveAPIKey: { _ in throw DevelopmentCredentialAccessError.persistenceDisabled },
+            removeAPIKey: { throw DevelopmentCredentialAccessError.persistenceDisabled }
+        )
+    }
+
+    static var applicationDefault: Self {
+        #if CALL_RECORDER_KEYCHAIN_FREE_DEV
+        keychainFreeDevelopment
+        #else
+        keychainBacked()
+        #endif
+    }
 }
 
 private struct ImportedAudioMetadata: Sendable {
@@ -73,18 +162,23 @@ private func inspectImportedAudio(at audioURL: URL) throws -> ImportedAudioMetad
 
 @MainActor
 final class AppModel: ObservableObject {
+    // MARK: Observable State
+
     static weak var shared: AppModel?
     static let automaticMicrophoneUID = "__automatic_microphone__"
 
     @Published private(set) var captureState: CaptureSessionState = .ready
     @Published private(set) var backgroundActivity: RecordingJobActivity?
     @Published private(set) var recordings: [RecordingManifest] = []
+    @Published private(set) var transcriptDocuments: [UUID: TranscriptDocument] = [:]
+    @Published private(set) var pendingTranscriptDocumentIDs: Set<UUID> = []
     @Published private(set) var microphones: [AudioInputDevice] = []
     @Published private(set) var elapsedSeconds: TimeInterval = 0
     @Published private(set) var captureStatistics: CaptureLiveStatistics = .empty
     @Published private(set) var hasDeepgramKey = false
     @Published private(set) var hasStoredDeepgramKey = false
     @Published private(set) var deepgramCredentialSource: DeepgramCredentialSource = .none
+    let canPersistDeepgramKey: Bool
     @Published private(set) var storageUsage: RecordingStorageUsage = .zero
     @Published private(set) var isRefreshingStorage = false
     @Published private(set) var isRefreshingHistory = false
@@ -98,6 +192,18 @@ final class AppModel: ObservableObject {
     @Published private(set) var storageErrorMessage: String?
     @Published private(set) var unseenTranscriptCompletionID: UUID?
     @Published private(set) var isPreparingToTerminate = false
+    @Published private(set) var calendarSuggestionsEnabled = false
+    @Published private(set) var calendarAccessState: CalendarAccessState = .notDetermined
+    @Published private(set) var availableCalendars: [CalendarDescriptor] = []
+    @Published private(set) var selectedCalendarIDs: Set<String> = []
+    @Published private(set) var calendarCandidates: [CalendarEventCandidate] = []
+    @Published private(set) var calendarSuggestion: CalendarEventCandidate?
+    @Published private(set) var calendarSelectionNeedsReview = false
+    @Published private(set) var calendarChoiceWasMade = false
+    @Published private(set) var meetingChoicesByRecordingID: [UUID: [CalendarEventCandidate]] = [:]
+    @Published private(set) var isRefreshingCalendar = false
+    @Published private(set) var calendarErrorMessage: String?
+    @Published private(set) var recordingTitle = ""
     @Published var historyErrorMessage: String?
 
     @Published var selectedMicrophoneUID: String {
@@ -117,6 +223,8 @@ final class AppModel: ObservableObject {
     }
     @Published private(set) var outputDirectory: URL
 
+    // MARK: Internal State and Services
+
     private var captureStateMachine = CaptureSessionStateMachine()
     private var captureEngine: CaptureEngine?
     private var activeCapture: RecordingManifest?
@@ -124,6 +232,13 @@ final class AppModel: ObservableObject {
     private var pausedAt: Date?
     private var accumulatedPausedSeconds: TimeInterval = 0
     private var capturePollTask: Task<Void, Never>?
+    private var startupCleanupTask: Task<Void, Never>?
+    private var microphoneRefreshTask: Task<Void, Never>?
+    private var backgroundHistoryReloadTask: Task<Void, Never>?
+    private var historyRefreshTask: Task<Void, Never>?
+    private var importedAudioTask: Task<Void, Never>?
+    private var forgetHistoryTask: Task<Void, Never>?
+    private var storageRefreshTask: Task<Void, Never>?
     private var fatalStopRequested = false
     private var isMenuPresented = false
     private var isHistoryPresented = false
@@ -133,12 +248,55 @@ final class AppModel: ObservableObject {
     @Published private var localTranscriptRecoveryIDs: Set<UUID> = []
     @Published private var pendingTranscriptEligibilityIDs: Set<UUID> = []
     private var eligibilityGeneration = 0
+    private var transcriptLoadGeneration = 0
+    private var backgroundHistoryReloadGeneration = 0
+    private var calendarRefreshGeneration = 0
+    private var meetingChoicesGeneration = 0
+    private let transcriptLoader = TranscriptDocumentLoader()
+    private var transcriptLoadTask: Task<Void, Never>?
+    private var transcriptPriorityLoadTask: Task<Void, Never>?
+    private var eligibilityTask: Task<Void, Never>?
+    private var calendarRefreshTask: Task<Void, Never>?
+    private var meetingChoicesTask: Task<Void, Never>?
     private var storageRefreshPending = false
+    private var calendarPrefilledTitle: String?
+    private var calendarContextRefreshedAt: Date?
+    private var defaultInputDeviceID: UInt32?
+    private var recordingTitleWasEdited = false
+    private var calendarContextEvents: [CalendarEventCandidate] = []
+    private var pendingBackgroundCompletionIDs: Set<UUID> = []
     private let store: RecordingStore
     private let defaults: UserDefaults
-    private let keychain: KeychainStore
+    private let credentialAccess: DeepgramCredentialAccess
+    private let calendarReader = CalendarReader()
     private let audioExportService = AudioExportService()
     private let jobQueue: RecordingJobQueue
+
+    // MARK: Availability and Presentation
+
+    private var hasPendingHistoryWork: Bool {
+        isRefreshingHistory ||
+            isImportingAudio ||
+            isForgettingHistory ||
+            backgroundHistoryReloadTask != nil ||
+            historyRefreshTask != nil ||
+            importedAudioTask != nil ||
+            forgetHistoryTask != nil
+    }
+
+    private var hasPendingTerminationWork: Bool {
+        backgroundActivity != nil ||
+            hasPendingHistoryWork ||
+            isPerformingStartupCleanup ||
+            startupCleanupTask != nil ||
+            microphoneRefreshTask != nil ||
+            transcriptLoadTask != nil ||
+            transcriptPriorityLoadTask != nil ||
+            eligibilityTask != nil ||
+            calendarRefreshTask != nil ||
+            meetingChoicesTask != nil ||
+            storageRefreshTask != nil
+    }
 
     var isCaptureActive: Bool {
         captureState == .recording || captureState == .paused
@@ -146,7 +304,7 @@ final class AppModel: ObservableObject {
 
     var canStartRecording: Bool {
         !isPreparingToTerminate &&
-            !isForgettingHistory &&
+            !hasPendingHistoryWork &&
             captureState == .ready &&
             selectedMicrophone != nil
     }
@@ -157,29 +315,34 @@ final class AppModel: ObservableObject {
 
     var canImportAudio: Bool {
         !isPreparingToTerminate &&
-            !isForgettingHistory &&
-            !isRefreshingHistory &&
-            captureState == .ready &&
-            !isImportingAudio
+            !hasPendingHistoryWork &&
+            captureState == .ready
     }
 
     var canRefreshHistory: Bool {
         !isPreparingToTerminate &&
-            !isForgettingHistory &&
-            !isRefreshingHistory &&
+            !hasPendingHistoryWork &&
             !isPerformingStartupCleanup &&
-            !isImportingAudio &&
             captureState == .ready &&
             backgroundActivity == nil &&
             pendingRecordingCount == 0
     }
 
     var historyRefreshUnavailableReason: String? {
-        if isRefreshingHistory { return "Checking Finder for changes." }
+        if isRefreshingHistory || historyRefreshTask != nil {
+            return "Checking Finder for changes."
+        }
+        if backgroundHistoryReloadTask != nil {
+            return "Updating recordings after background work."
+        }
         if isPreparingToTerminate { return "Unavailable while the app is preparing to quit." }
-        if isForgettingHistory { return "Available after private history is removed." }
+        if isForgettingHistory || forgetHistoryTask != nil {
+            return "Available after private history is removed."
+        }
         if isPerformingStartupCleanup { return "Available after startup cleanup finishes." }
-        if isImportingAudio { return "Available after the selected audio finishes importing." }
+        if isImportingAudio || importedAudioTask != nil {
+            return "Available after the selected audio finishes importing."
+        }
         if captureState != .ready { return "Available after the current recording ends." }
         if backgroundActivity != nil || pendingRecordingCount > 0 {
             return "Available after recordings finish processing."
@@ -189,10 +352,19 @@ final class AppModel: ObservableObject {
 
     var importUnavailableReason: String? {
         if isPreparingToTerminate { return "Unavailable while the app is preparing to quit." }
-        if isForgettingHistory { return "Available after private history is removed." }
-        if isRefreshingHistory { return "Available after Recordings finishes refreshing." }
+        if backgroundHistoryReloadTask != nil {
+            return "Available after Recordings finishes updating."
+        }
+        if isForgettingHistory || forgetHistoryTask != nil {
+            return "Available after private history is removed."
+        }
+        if isRefreshingHistory || historyRefreshTask != nil {
+            return "Available after Recordings finishes refreshing."
+        }
         if captureState != .ready { return "Available after the current recording ends." }
-        if isImportingAudio { return "The selected audio is already being prepared." }
+        if isImportingAudio || importedAudioTask != nil {
+            return "The selected audio is already being prepared."
+        }
         return nil
     }
 
@@ -200,19 +372,26 @@ final class AppModel: ObservableObject {
         !isPreparingToTerminate &&
             captureState == .ready &&
             backgroundActivity == nil &&
-            !isForgettingHistory &&
-            !isImportingAudio &&
+            !hasPendingHistoryWork &&
             !isRefreshingStorage &&
-            !isRefreshingHistory &&
             !isPerformingStartupCleanup &&
             storageUsage.privateHistoryBytes > 0 &&
             pendingRecordingCount == 0
     }
 
     var forgetHistoryUnavailableReason: String? {
-        if isForgettingHistory { return "Removing private app history…" }
-        if isImportingAudio { return "Available after the selected audio finishes importing." }
-        if isRefreshingStorage || isRefreshingHistory { return "Available after storage refresh finishes." }
+        if isForgettingHistory || forgetHistoryTask != nil {
+            return "Removing private app history…"
+        }
+        if backgroundHistoryReloadTask != nil {
+            return "Available after Recordings finishes updating."
+        }
+        if isImportingAudio || importedAudioTask != nil {
+            return "Available after the selected audio finishes importing."
+        }
+        if isRefreshingStorage || isRefreshingHistory || historyRefreshTask != nil {
+            return "Available after storage refresh finishes."
+        }
         if isPerformingStartupCleanup { return "Available after startup cleanup finishes." }
         if storageUsage.privateHistoryBytes == 0 { return "No private app history to remove." }
         if isPreparingToTerminate { return "Unavailable while the app is preparing to quit." }
@@ -230,11 +409,7 @@ final class AppModel: ObservableObject {
     }
 
     var requiresDeferredTermination: Bool {
-        captureState != .ready || hasActiveTranscription
-    }
-
-    var activeCaptureID: UUID? {
-        activeCapture?.id
+        captureState != .ready || hasPendingTerminationWork
     }
 
     var backgroundSummaryRecording: RecordingManifest? {
@@ -244,14 +419,14 @@ final class AppModel: ObservableObject {
         }
         let candidates = recordings.filter { $0.id != activeCapture?.id }
         if captureState == .ready,
-           let actionable = candidates.first(where: Self.needsAttention) {
+           let actionable = candidates.first(where: \.requiresAttention) {
             return actionable
         }
         return candidates.first
     }
 
     var hasRecordingNeedingAttention: Bool {
-        recordings.contains(where: Self.needsAttention)
+        recordings.contains(where: \.requiresAttention)
     }
 
     var hasUnseenTranscriptCompletion: Bool {
@@ -283,7 +458,10 @@ final class AppModel: ObservableObject {
     }
 
     var automaticMicrophone: AudioInputDevice? {
-        AudioDeviceService.preferredInputDevice(from: microphones)
+        AudioDeviceService.preferredInputDevice(
+            from: microphones,
+            defaultDeviceID: defaultInputDeviceID
+        )
     }
 
     var automaticMicrophoneLabel: String {
@@ -291,7 +469,7 @@ final class AppModel: ObservableObject {
             let reason: String
             if microphone.isInUse {
                 reason = "in use"
-            } else if microphone.id == AudioDeviceService.defaultInputDeviceID() {
+            } else if microphone.id == defaultInputDeviceID {
                 reason = "system default"
             } else {
                 reason = "available"
@@ -301,6 +479,8 @@ final class AppModel: ObservableObject {
         return "Automatic"
     }
 
+    // MARK: Initialization
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let storedOutput = defaults.string(forKey: Keys.outputDirectory)
@@ -308,11 +488,12 @@ final class AppModel: ObservableObject {
             ?? RecordingStore.defaultRootDirectory
         let store = RecordingStore(rootDirectory: RecordingStore.defaultHistoryDirectory)
         self.store = store
-        let keychain = KeychainStore()
-        self.keychain = keychain
+        let credentialAccess = DeepgramCredentialAccess.applicationDefault
+        self.credentialAccess = credentialAccess
+        canPersistDeepgramKey = credentialAccess.supportsPersistence
         jobQueue = RecordingJobQueue(
             store: store,
-            apiKeyProvider: { try keychain.resolvedDeepgramAPIKey() }
+            apiKeyProvider: credentialAccess.resolvedAPIKey
         )
         language = RecordingLanguage(
             rawValue: defaults.string(forKey: Keys.language) ?? ""
@@ -322,30 +503,35 @@ final class AppModel: ObservableObject {
         )
         keytermPromptingEnabled = defaults.bool(forKey: Keys.keytermPromptingEnabled)
         keytermsText = defaults.string(forKey: Keys.keytermsText) ?? ""
+        calendarSuggestionsEnabled = defaults.bool(forKey: Keys.calendarSuggestionsEnabled)
+        selectedCalendarIDs = Set(
+            defaults.stringArray(forKey: Keys.selectedCalendarIDs) ?? []
+        )
         selectedMicrophoneUID = defaults.string(forKey: Keys.microphoneUID)
             ?? Self.automaticMicrophoneUID
         Self.shared = self
 
         jobQueue.onChange = { [weak self] activity in
             guard let self else { return }
+            let completedActivity = backgroundActivity
             backgroundActivity = activity
-            reloadHistory()
+            guard activity == nil else { return }
+            reloadHistoryAfterBackgroundChange(
+                completedRecordingID: completedActivity?.recordingID
+            )
             refreshStorageUsage()
-            if let recordingID = activity?.recordingID,
-               !isMenuPresented,
-               !isHistoryPresented,
-               recordings.first(where: { $0.id == recordingID })?.transcriptionStatus == .complete {
-                unseenTranscriptCompletionID = recordingID
-            }
             completePendingTerminationIfReady()
         }
-        refreshMicrophones()
+        refreshMicrophonesAsync()
         refreshCredentialStatus()
         reloadHistory(recoverInterrupted: true, reconcile: true)
+        if calendarSuggestionsEnabled {
+            refreshCalendarContext()
+        }
 
         let staleArtifactCutoff = Date().addingTimeInterval(-24 * 60 * 60)
         let artifactDirectories = Set(
-            [outputDirectory] + ((try? store.loadAll()) ?? []).compactMap { recording in
+            [outputDirectory] + recordings.compactMap { recording in
                 guard recording.effectiveOrigin == .nativeRecording else { return nil }
                 return recording.files.exportDirectory.map {
                     URL(fileURLWithPath: $0, isDirectory: true)
@@ -353,7 +539,7 @@ final class AppModel: ObservableObject {
                 }
             }
         )
-        Task { [weak self] in
+        startupCleanupTask = Task { [weak self] in
             await Task.detached(priority: .utility) {
                 try? store.cleanupStalePrivateArtifacts(olderThan: staleArtifactCutoff)
                 for directory in artifactDirectories {
@@ -365,47 +551,378 @@ final class AppModel: ObservableObject {
             }.value
             guard let self else { return }
             isPerformingStartupCleanup = false
+            startupCleanupTask = nil
             refreshStorageUsage()
-            if captureState == .ready {
+            if !isPreparingToTerminate, captureState == .ready {
                 jobQueue.start()
             }
+            completePendingTerminationIfReady()
         }
     }
 
+    // MARK: Microphones
+
     func refreshMicrophones() {
         microphones = AudioDeviceService.inputDevices()
+        defaultInputDeviceID = AudioDeviceService.defaultInputDeviceID()
+        normalizeSelectedMicrophone()
+    }
+
+    func refreshMicrophonesAsync() {
+        guard !isPreparingToTerminate else { return }
+        microphoneRefreshTask?.cancel()
+        microphoneRefreshTask = Task { [weak self] in
+            let snapshot = await Task.detached(priority: .utility) {
+                (
+                    devices: AudioDeviceService.inputDevices(),
+                    defaultID: AudioDeviceService.defaultInputDeviceID()
+                )
+            }.value
+            guard let self, !Task.isCancelled else { return }
+            microphones = snapshot.devices
+            defaultInputDeviceID = snapshot.defaultID
+            normalizeSelectedMicrophone()
+            microphoneRefreshTask = nil
+        }
+    }
+
+    private func normalizeSelectedMicrophone() {
         if selectedMicrophoneUID != Self.automaticMicrophoneUID,
            !microphones.contains(where: { $0.uid == selectedMicrophoneUID }) {
             selectedMicrophoneUID = Self.automaticMicrophoneUID
         }
     }
 
+    // MARK: Capture Metadata and Calendar
+
+    func setRecordingTitle(_ title: String) {
+        recordingTitle = title
+        recordingTitleWasEdited = true
+    }
+
+    func setCalendarSuggestionsEnabled(_ enabled: Bool) {
+        guard canChangeCaptureConfiguration else { return }
+        calendarSuggestionsEnabled = enabled
+        defaults.set(enabled, forKey: Keys.calendarSuggestionsEnabled)
+        if enabled {
+            refreshCalendarContext(requestAccess: true)
+        } else {
+            calendarRefreshTask?.cancel()
+            calendarRefreshTask = nil
+            calendarRefreshGeneration += 1
+            calendarContextRefreshedAt = nil
+            calendarContextEvents = []
+            calendarCandidates = []
+            calendarSuggestion = nil
+            calendarSelectionNeedsReview = false
+            calendarChoiceWasMade = false
+            availableCalendars = []
+            calendarErrorMessage = nil
+            isRefreshingCalendar = false
+            clearCalendarPrefillIfNeeded()
+        }
+    }
+
+    func setCalendar(_ calendar: CalendarDescriptor, selected: Bool) {
+        guard canChangeCaptureConfiguration else { return }
+        if selected {
+            selectedCalendarIDs.insert(calendar.id)
+        } else {
+            selectedCalendarIDs.remove(calendar.id)
+        }
+        defaults.set(selectedCalendarIDs.sorted(), forKey: Keys.selectedCalendarIDs)
+        defaults.set(true, forKey: Keys.calendarSelectionInitialized)
+        scheduleCalendarContextRefresh(
+            requestAccess: false,
+            reloadCalendars: false,
+            debounceMilliseconds: 200
+        )
+    }
+
+    func calendarIsSelected(_ calendar: CalendarDescriptor) -> Bool {
+        selectedCalendarIDs.contains(calendar.id)
+    }
+
+    func selectCalendarSuggestion(_ event: CalendarEventCandidate?) {
+        guard canChangeCaptureConfiguration else { return }
+        calendarSuggestion = event
+        calendarSelectionNeedsReview = false
+        calendarChoiceWasMade = true
+        applyCalendarPrefill(event)
+    }
+
+    func refreshCalendarContext(
+        requestAccess: Bool = false,
+        reloadCalendars: Bool = true
+    ) {
+        scheduleCalendarContextRefresh(
+            requestAccess: requestAccess,
+            reloadCalendars: reloadCalendars,
+            debounceMilliseconds: 0
+        )
+    }
+
+    func refreshCalendarContextIfStale(maxAge: TimeInterval = 60) {
+        guard calendarSuggestionsEnabled,
+              canChangeCaptureConfiguration,
+              calendarRefreshTask == nil,
+              calendarContextRefreshedAt.map({ Date().timeIntervalSince($0) >= maxAge }) ?? true
+        else { return }
+        scheduleCalendarContextRefresh(
+            requestAccess: false,
+            reloadCalendars: availableCalendars.isEmpty,
+            debounceMilliseconds: 0
+        )
+    }
+
+    private func scheduleCalendarContextRefresh(
+        requestAccess: Bool,
+        reloadCalendars: Bool,
+        debounceMilliseconds: UInt64
+    ) {
+        guard !isPreparingToTerminate,
+              calendarSuggestionsEnabled,
+              canChangeCaptureConfiguration
+        else { return }
+        calendarRefreshTask?.cancel()
+        calendarRefreshGeneration += 1
+        let generation = calendarRefreshGeneration
+        isRefreshingCalendar = debounceMilliseconds == 0
+        calendarErrorMessage = nil
+        let reader = calendarReader
+        calendarRefreshTask = Task { [weak self] in
+            guard let self else { return }
+            if debounceMilliseconds > 0 {
+                do {
+                    try await Task.sleep(
+                        nanoseconds: debounceMilliseconds * 1_000_000
+                    )
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled,
+                      generation == calendarRefreshGeneration
+                else { return }
+                isRefreshingCalendar = true
+            }
+            do {
+                var accessState = await reader.accessState()
+                if requestAccess, accessState == .notDetermined {
+                    _ = try await reader.requestFullAccess()
+                    accessState = await reader.accessState()
+                }
+                try Task.checkCancellation()
+                let calendars: [CalendarDescriptor]
+                if accessState == .fullAccess,
+                   reloadCalendars || availableCalendars.isEmpty {
+                    calendars = await reader.availableCalendars()
+                } else if accessState == .fullAccess {
+                    calendars = availableCalendars
+                } else {
+                    calendars = []
+                }
+                try Task.checkCancellation()
+                var selectedIDs = selectedCalendarIDs
+                if accessState == .fullAccess,
+                   !defaults.bool(forKey: Keys.calendarSelectionInitialized) {
+                    selectedIDs = Set(calendars.map(\.id))
+                    defaults.set(selectedIDs.sorted(), forKey: Keys.selectedCalendarIDs)
+                    defaults.set(true, forKey: Keys.calendarSelectionInitialized)
+                }
+                let now = Date()
+                let events = accessState == .fullAccess
+                    ? await reader.eventsNearRecordingStart(
+                        now: now,
+                        selectedCalendarIDs: selectedIDs
+                    )
+                    : []
+                try Task.checkCancellation()
+                let match = CalendarEventMatchPolicy.matchAtRecordingStart(
+                    from: events,
+                    now: now
+                )
+                guard generation == calendarRefreshGeneration,
+                      !Task.isCancelled
+                else { return }
+                calendarAccessState = accessState
+                availableCalendars = calendars
+                selectedCalendarIDs = selectedIDs
+                calendarContextEvents = events
+                calendarCandidates = match.candidates
+                if !calendarChoiceWasMade {
+                    calendarSuggestion = match.automaticSelection
+                    calendarSelectionNeedsReview = match.needsReview
+                    applyCalendarPrefill(match.automaticSelection)
+                }
+                calendarContextRefreshedAt = Date()
+                isRefreshingCalendar = false
+                calendarRefreshTask = nil
+            } catch {
+                let accessState = await reader.accessState()
+                guard generation == calendarRefreshGeneration,
+                      !Task.isCancelled
+                else { return }
+                calendarAccessState = accessState
+                calendarContextEvents = []
+                calendarCandidates = []
+                if !calendarChoiceWasMade {
+                    calendarSuggestion = nil
+                    calendarSelectionNeedsReview = false
+                    clearCalendarPrefillIfNeeded()
+                }
+                isRefreshingCalendar = false
+                calendarErrorMessage = error.localizedDescription
+                calendarRefreshTask = nil
+            }
+        }
+    }
+
+    func openCalendarPrivacySettings() {
+        openPrivacySettings(anchor: "Privacy_Calendars")
+    }
+
+    private func applyCalendarPrefill(_ suggestion: CalendarEventCandidate?) {
+        guard let suggestion,
+              let proposedTitle = RecordingManifest.normalizedTitle(suggestion.title)
+        else {
+            clearCalendarPrefillIfNeeded()
+            return
+        }
+        if !recordingTitleWasEdited {
+            recordingTitle = proposedTitle
+            calendarPrefilledTitle = proposedTitle
+        }
+    }
+
+    private func clearCalendarPrefillIfNeeded() {
+        if !recordingTitleWasEdited {
+            recordingTitle = ""
+        }
+        calendarPrefilledTitle = nil
+    }
+
+    private func meetingChoiceAtRecordingStart(
+        _ startedAt: Date
+    ) -> (
+        state: MeetingAssociationState,
+        event: CalendarEventCandidate?,
+        candidates: [CalendarEventCandidate]
+    ) {
+        guard calendarSuggestionsEnabled else { return (.none, nil, []) }
+        let match = CalendarEventMatchPolicy.matchAtRecordingStart(
+            from: calendarContextEvents,
+            now: startedAt
+        )
+        if calendarChoiceWasMade {
+            guard let calendarSuggestion else { return (.none, nil, []) }
+            let candidates = mergedCalendarEvents(match.candidates + [calendarSuggestion])
+            return (.manual, calendarSuggestion, candidates)
+        }
+        calendarCandidates = match.candidates
+        calendarSuggestion = match.automaticSelection
+        calendarSelectionNeedsReview = match.needsReview
+        applyCalendarPrefill(match.automaticSelection)
+        if let event = match.automaticSelection {
+            return (.automatic, event, match.candidates)
+        }
+        if match.needsReview {
+            return (.unresolved, nil, match.candidates)
+        }
+        return (.none, nil, match.candidates)
+    }
+
+    private func resetPendingMeetingChoice() {
+        calendarContextEvents = []
+        calendarCandidates = []
+        calendarSuggestion = nil
+        calendarSelectionNeedsReview = false
+        calendarChoiceWasMade = false
+    }
+
+    // MARK: History and Transcript Index
+
     func reloadHistory(recoverInterrupted: Bool = false, reconcile: Bool = false) {
+        invalidateBackgroundHistoryReload()
         do {
             if recoverInterrupted {
                 try store.recoverInterruptedRecordings()
             }
-            applyRecordings(reconcile ? try store.reconcileExternalFiles() : try store.loadAll())
+            let loadedRecordings = reconcile
+                ? try store.reconcileExternalFiles()
+                : try store.loadAll()
+            applyRecordings(loadedRecordings)
+            publishPendingBackgroundCompletions(in: loadedRecordings)
         } catch {
             historyErrorMessage = error.localizedDescription
         }
+    }
+
+    private func reloadHistoryAfterBackgroundChange(completedRecordingID: UUID?) {
+        guard !isPreparingToTerminate else { return }
+        invalidateBackgroundHistoryReload()
+        if let completedRecordingID {
+            pendingBackgroundCompletionIDs.insert(completedRecordingID)
+        }
+        let generation = backgroundHistoryReloadGeneration
+        let store = self.store
+        backgroundHistoryReloadTask = Task { [weak self] in
+            let result = await Task.detached(priority: .utility) {
+                Result { try store.loadAll() }
+            }.value
+            guard let self,
+                  !Task.isCancelled,
+                  generation == backgroundHistoryReloadGeneration
+            else { return }
+            switch result {
+            case .success(let recordings):
+                applyRecordings(recordings)
+                publishPendingBackgroundCompletions(in: recordings)
+            case .failure(let error):
+                historyErrorMessage = error.localizedDescription
+            }
+            backgroundHistoryReloadTask = nil
+            completePendingTerminationIfReady()
+        }
+    }
+
+    private func invalidateBackgroundHistoryReload() {
+        backgroundHistoryReloadTask?.cancel()
+        backgroundHistoryReloadTask = nil
+        backgroundHistoryReloadGeneration += 1
+    }
+
+    private func publishPendingBackgroundCompletions(
+        in loadedRecordings: [RecordingManifest]
+    ) {
+        if !isMenuPresented, !isHistoryPresented,
+           let completedID = pendingBackgroundCompletionIDs.first(where: { id in
+               loadedRecordings.first(where: { $0.id == id })?.transcriptionStatus == .complete
+           }) {
+            unseenTranscriptCompletionID = completedID
+        }
+        pendingBackgroundCompletionIDs = []
     }
 
     func refreshHistoryFromFinder() {
         guard canRefreshHistory else { return }
         isRefreshingHistory = true
         let store = self.store
-        Task {
+        historyRefreshTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                isRefreshingHistory = false
+                historyRefreshTask = nil
+                completePendingTerminationIfReady()
+            }
             let result = await Task.detached(priority: .utility) {
                 Result { try store.reconcileExternalFiles() }
             }.value
-            isRefreshingHistory = false
             switch result {
             case .success(let recordings):
                 applyRecordings(recordings)
                 refreshStorageUsage()
                 if hasDeepgramKey {
-                    resumeWaitingTranscriptions()
+                    resumeWaitingTranscriptions(allowDuringHistoryRefresh: true)
                 }
             case .failure(let error):
                 historyErrorMessage = error.localizedDescription
@@ -415,6 +932,70 @@ final class AppModel: ObservableObject {
 
     private func applyRecordings(_ loadedRecordings: [RecordingManifest]) {
         recordings = loadedRecordings
+        let loadedIDs = Set(loadedRecordings.map(\.id))
+        let completedRecordings = loadedRecordings.filter {
+            $0.transcriptionStatus == .complete
+        }
+        let completeTranscriptIDs = Set(completedRecordings.map(\.id))
+        let retainedDocuments = transcriptDocuments.filter {
+            completeTranscriptIDs.contains($0.key)
+        }
+        if retainedDocuments != transcriptDocuments {
+            transcriptDocuments = retainedDocuments
+        }
+        meetingChoicesByRecordingID = meetingChoicesByRecordingID.filter {
+            loadedIDs.contains($0.key)
+        }
+        transcriptLoadTask?.cancel()
+        transcriptPriorityLoadTask?.cancel()
+        transcriptLoadGeneration += 1
+        let transcriptGeneration = transcriptLoadGeneration
+        pendingTranscriptDocumentIDs = completeTranscriptIDs.subtracting(
+            transcriptDocuments.keys
+        )
+        scheduleEligibilityRefresh(for: loadedRecordings)
+        guard !isPreparingToTerminate, captureState == .ready else {
+            acknowledgeMissingTranscriptCompletionIfNeeded()
+            return
+        }
+        guard !completedRecordings.isEmpty else {
+            pendingTranscriptDocumentIDs = []
+            let loader = transcriptLoader
+            transcriptLoadTask = Task {
+                await loader.retainOnly([])
+            }
+            acknowledgeMissingTranscriptCompletionIfNeeded()
+            return
+        }
+        let transcriptStore = store
+        let loader = transcriptLoader
+        transcriptLoadTask = Task { [weak self] in
+            await loader.retainOnly(completeTranscriptIDs)
+            var documents: [UUID: TranscriptDocument] = [:]
+            for recording in completedRecordings {
+                guard !Task.isCancelled else { return }
+                if let entry = await loader.load(recording, from: transcriptStore),
+                   let document = entry.document {
+                    documents[recording.id] = document
+                }
+                await Task.yield()
+            }
+            guard let self,
+                  !Task.isCancelled,
+                  transcriptGeneration == transcriptLoadGeneration
+            else { return }
+            if documents != transcriptDocuments {
+                transcriptDocuments = documents
+            }
+            pendingTranscriptDocumentIDs = []
+            transcriptLoadTask = nil
+        }
+        acknowledgeMissingTranscriptCompletionIfNeeded()
+    }
+
+    private func scheduleEligibilityRefresh(
+        for loadedRecordings: [RecordingManifest]
+    ) {
         recoverableCaptureIDs = []
         pendingFinalizationEligibilityIDs = Set(loadedRecordings.lazy.filter {
             FinalizationRecoveryPolicy.canRecover(
@@ -426,6 +1007,51 @@ final class AppModel: ObservableObject {
         pendingTranscriptEligibilityIDs = Set(loadedRecordings.lazy.filter {
             TranscriptionRetryPolicy.canRetry($0)
         }.map(\.id))
+        eligibilityTask?.cancel()
+        eligibilityTask = nil
+        eligibilityGeneration += 1
+        guard !isPreparingToTerminate, captureState == .ready else { return }
+        let generation = eligibilityGeneration
+        let store = self.store
+        eligibilityTask = Task.detached(priority: .utility) { [weak self] in
+            var recoverable: Set<UUID> = []
+            var localRetries: Set<UUID> = []
+            for recording in loadedRecordings {
+                guard !Task.isCancelled else { return }
+                if FinalizationRecoveryPolicy.canRecover(
+                    recording,
+                    hasRecoverableCapture: true
+                ), store.hasClosedCaptureMetadata(for: recording) {
+                    recoverable.insert(recording.id)
+                }
+                if TranscriptionRetryPolicy.canRetry(recording),
+                   store.hasValidRetainedTranscriptResponse(for: recording) {
+                    localRetries.insert(recording.id)
+                }
+            }
+            guard !Task.isCancelled else { return }
+            await self?.finishEligibilityRefresh(
+                recoverable: recoverable,
+                localRetries: localRetries,
+                generation: generation
+            )
+        }
+    }
+
+    private func finishEligibilityRefresh(
+        recoverable: Set<UUID>,
+        localRetries: Set<UUID>,
+        generation: Int
+    ) {
+        guard generation == eligibilityGeneration else { return }
+        recoverableCaptureIDs = recoverable
+        pendingFinalizationEligibilityIDs = []
+        localTranscriptRecoveryIDs = localRetries
+        pendingTranscriptEligibilityIDs = []
+        eligibilityTask = nil
+    }
+
+    private func acknowledgeMissingTranscriptCompletionIfNeeded() {
         if let unseenTranscriptCompletionID,
            !recordings.contains(where: {
                $0.id == unseenTranscriptCompletionID &&
@@ -433,33 +1059,16 @@ final class AppModel: ObservableObject {
            }) {
             acknowledgeTranscriptCompletion()
         }
-        eligibilityGeneration += 1
-        let generation = eligibilityGeneration
-        let store = self.store
-        Task {
-            let result = await Task.detached(priority: .utility) {
-                let recoverable = Set(loadedRecordings.lazy.filter { recording in
-                    FinalizationRecoveryPolicy.canRecover(
-                        recording,
-                        hasRecoverableCapture: true
-                    ) && store.hasClosedCaptureMetadata(for: recording)
-                }.map(\.id))
-                let localRetries = Set(loadedRecordings.lazy.filter { recording in
-                    TranscriptionRetryPolicy.canRetry(recording) &&
-                        store.hasValidRetainedTranscriptResponse(for: recording)
-                }.map(\.id))
-                return (recoverable, localRetries)
-            }.value
-            guard generation == eligibilityGeneration else { return }
-            recoverableCaptureIDs = result.0
-            pendingFinalizationEligibilityIDs = []
-            localTranscriptRecoveryIDs = result.1
-            pendingTranscriptEligibilityIDs = []
-        }
     }
+
+    // MARK: Capture Controls
 
     func startRecording() {
         guard canStartRecording, transitionCapture(.startRequested) else { return }
+        calendarRefreshTask?.cancel()
+        calendarRefreshTask = nil
+        calendarRefreshGeneration += 1
+        isRefreshingCalendar = false
         jobQueue.suspendNewWork()
         captureIssue = nil
         Task { await beginRecording() }
@@ -531,6 +1140,8 @@ final class AppModel: ObservableObject {
         Task { await discardActiveCapture() }
     }
 
+    // MARK: Presentation Lifecycle
+
     func setMenuPresented(_ presented: Bool) {
         isMenuPresented = presented
         if presented {
@@ -548,6 +1159,181 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: Recording Detail Data
+
+    func transcriptDocument(for recording: RecordingManifest) -> TranscriptDocument? {
+        transcriptDocuments[recording.id]
+    }
+
+    func transcriptIsLoading(for recording: RecordingManifest) -> Bool {
+        pendingTranscriptDocumentIDs.contains(recording.id)
+    }
+
+    func ensureTranscriptLoaded(for recording: RecordingManifest) {
+        guard !isPreparingToTerminate,
+              captureState == .ready,
+              recording.transcriptionStatus == .complete,
+              transcriptDocuments[recording.id] == nil,
+              pendingTranscriptDocumentIDs.contains(recording.id)
+        else { return }
+        transcriptPriorityLoadTask?.cancel()
+        let generation = transcriptLoadGeneration
+        let loader = transcriptLoader
+        let store = self.store
+        let recordingID = recording.id
+        transcriptPriorityLoadTask = Task { [weak self] in
+            let entry = await loader.load(recording, from: store)
+            guard let self,
+                  !Task.isCancelled,
+                  generation == transcriptLoadGeneration,
+                  recordings.contains(where: {
+                      $0.id == recordingID && $0.transcriptionStatus == .complete
+                  })
+            else { return }
+            if let document = entry?.document,
+               transcriptDocuments[recordingID] != document {
+                transcriptDocuments[recordingID] = document
+            }
+            pendingTranscriptDocumentIDs.remove(recordingID)
+            transcriptPriorityLoadTask = nil
+        }
+    }
+
+    func resolvedAudioURL(for recording: RecordingManifest) -> URL? {
+        try? store.audioURL(for: recording)
+    }
+
+    func meetingChoices(for recording: RecordingManifest) -> [CalendarEventCandidate] {
+        mergedCalendarEvents(
+            (recording.calendarCandidates ?? []) +
+                (recording.assignedCalendarEvent.map { [$0] } ?? []) +
+                (meetingChoicesByRecordingID[recording.id] ?? [])
+        )
+    }
+
+    func refreshMeetingChoices(for recording: RecordingManifest) {
+        guard !isPreparingToTerminate,
+              calendarSuggestionsEnabled,
+              let recordingEnd = recording.effectiveEndedAt
+        else { return }
+        meetingChoicesTask?.cancel()
+        meetingChoicesGeneration += 1
+        let generation = meetingChoicesGeneration
+        let reader = calendarReader
+        let selectedIDs = selectedCalendarIDs
+        let recordingID = recording.id
+        let recordingStart = recording.effectiveStartedAt
+        meetingChoicesTask = Task { [weak self] in
+            let events = await reader.eventsAroundRecording(
+                startDate: recordingStart,
+                endDate: recordingEnd,
+                selectedCalendarIDs: selectedIDs
+            )
+            guard let self,
+                  !Task.isCancelled,
+                  generation == meetingChoicesGeneration,
+                  recordings.contains(where: { $0.id == recordingID })
+            else { return }
+            meetingChoicesByRecordingID[recordingID] = mergedCalendarEvents(events)
+            meetingChoicesTask = nil
+        }
+    }
+
+    // MARK: Recording Metadata Actions
+
+    func assignMeeting(
+        _ event: CalendarEventCandidate,
+        to original: RecordingManifest
+    ) {
+        guard canEditMetadata(for: original),
+              var recording = try? store.load(id: original.id)
+        else { return }
+        recording.assignMeeting(event, state: .manual, updateCalendarTitle: true)
+        do {
+            try store.save(recording)
+            reloadHistory()
+        } catch {
+            historyErrorMessage = error.localizedDescription
+        }
+    }
+
+    func clearMeetingAssociation(for original: RecordingManifest) {
+        guard canEditMetadata(for: original),
+              var recording = try? store.load(id: original.id)
+        else { return }
+        recording.clearMeetingAssociation(keepCandidates: false)
+        do {
+            try store.save(recording)
+            reloadHistory()
+        } catch {
+            historyErrorMessage = error.localizedDescription
+        }
+    }
+
+    @discardableResult
+    func renameRecording(_ original: RecordingManifest, to title: String) -> Bool {
+        guard canEditMetadata(for: original) else { return false }
+        do {
+            var recording = try store.load(id: original.id)
+            recording.title = RecordingManifest.normalizedTitle(title)
+            recording.titleSource = recording.title == nil ? nil : .user
+            try store.save(recording)
+            reloadHistory()
+            return true
+        } catch {
+            historyErrorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    func renameSpeaker(
+        in original: RecordingManifest,
+        channel: Int,
+        speaker: Int?,
+        to name: String
+    ) {
+        guard canEditMetadata(for: original),
+              !(original.effectiveOrigin == .nativeRecording && channel == 1),
+              var recording = try? store.load(id: original.id)
+        else { return }
+        recording.setSpeakerName(name, channel: channel, speaker: speaker)
+        do {
+            try store.save(recording)
+            reloadHistory()
+        } catch {
+            historyErrorMessage = error.localizedDescription
+        }
+    }
+
+    func canEditMetadata(for recording: RecordingManifest) -> Bool {
+        !isPreparingToTerminate &&
+            !hasPendingHistoryWork &&
+            !isPerformingStartupCleanup &&
+            activeCapture?.id != recording.id &&
+            !jobQueue.isWorking(on: recording.id)
+    }
+
+    func copyTranscript(in recording: RecordingManifest) {
+        do {
+            guard let url = try store.transcriptURL(for: recording) else { return }
+            let transcript = try String(contentsOf: url, encoding: .utf8)
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(transcript, forType: .string)
+        } catch {
+            historyErrorMessage = error.localizedDescription
+        }
+    }
+
+    private func mergedCalendarEvents(
+        _ events: [CalendarEventCandidate]
+    ) -> [CalendarEventCandidate] {
+        var identifiers: Set<String> = []
+        return events.filter { identifiers.insert($0.identifier).inserted }.sorted {
+            if $0.startDate == $1.startDate { return $0.endDate < $1.endDate }
+            return $0.startDate < $1.startDate
+        }
+    }
+
     func dismissCaptureIssue() {
         captureIssue = nil
     }
@@ -559,6 +1345,8 @@ final class AppModel: ObservableObject {
             captureFailure: "The Mac went to sleep during recording. Audio completed before sleep was preserved."
         )
     }
+
+    // MARK: Recovery and Deletion
 
     func retryTranscription(for original: RecordingManifest) {
         guard localTranscriptRecoveryIDs.contains(original.id) else { return }
@@ -573,15 +1361,12 @@ final class AppModel: ObservableObject {
         localTranscriptRecoveryIDs.contains(recording.id)
     }
 
-    func transcriptionRetryEligibilityIsPending(for recording: RecordingManifest) -> Bool {
-        pendingTranscriptEligibilityIDs.contains(recording.id)
-    }
-
     private func queueTranscription(
         for original: RecordingManifest,
         discardingRetainedResponse: Bool
     ) {
         guard !isPreparingToTerminate,
+              !hasPendingHistoryWork,
               captureState == .ready,
               !jobQueue.isWorking(on: original.id),
               TranscriptionRetryPolicy.canRetry(original),
@@ -608,7 +1393,7 @@ final class AppModel: ObservableObject {
     func canRetryTranscription(for recording: RecordingManifest) -> Bool {
         !isPreparingToTerminate &&
             captureState == .ready &&
-            !isRefreshingHistory &&
+            !hasPendingHistoryWork &&
             !isPerformingStartupCleanup &&
             !pendingTranscriptEligibilityIDs.contains(recording.id) &&
             !jobQueue.isWorking(on: recording.id) &&
@@ -616,24 +1401,9 @@ final class AppModel: ObservableObject {
     }
 
     func shouldOfferTranscriptionRetry(for recording: RecordingManifest) -> Bool {
-        !jobQueue.isWorking(on: recording.id) &&
+        !hasPendingHistoryWork &&
+            !jobQueue.isWorking(on: recording.id) &&
             TranscriptionRetryPolicy.canRetry(recording)
-    }
-
-    var retryUnavailableReason: String? {
-        if isPreparingToTerminate {
-            return "The app is preparing to quit."
-        }
-        if captureState != .ready {
-            return "Available after the current recording ends."
-        }
-        if isRefreshingHistory {
-            return "Available after Recordings finishes refreshing."
-        }
-        if isPerformingStartupCleanup {
-            return "Available after startup cleanup finishes."
-        }
-        return nil
     }
 
     func recoverFinalization(for original: RecordingManifest) {
@@ -659,14 +1429,15 @@ final class AppModel: ObservableObject {
     func canRecoverFinalization(for recording: RecordingManifest) -> Bool {
         !isPreparingToTerminate &&
             captureState == .ready &&
-            !isRefreshingHistory &&
+            !hasPendingHistoryWork &&
             !isPerformingStartupCleanup &&
             !pendingFinalizationEligibilityIDs.contains(recording.id) &&
             shouldOfferFinalizationRecovery(for: recording)
     }
 
     func shouldOfferFinalizationRecovery(for recording: RecordingManifest) -> Bool {
-        !jobQueue.isWorking(on: recording.id) &&
+        !hasPendingHistoryWork &&
+            !jobQueue.isWorking(on: recording.id) &&
             (pendingFinalizationEligibilityIDs.contains(recording.id) ||
                 FinalizationRecoveryPolicy.canRecover(
                     recording,
@@ -674,16 +1445,10 @@ final class AppModel: ObservableObject {
                 ))
     }
 
-    func finalizationRecoveryEligibilityIsPending(
-        for recording: RecordingManifest
-    ) -> Bool {
-        pendingFinalizationEligibilityIDs.contains(recording.id)
-    }
-
     func canDelete(_ recording: RecordingManifest) -> Bool {
         !isPreparingToTerminate &&
             captureState == .ready &&
-            !isRefreshingHistory &&
+            !hasPendingHistoryWork &&
             !isPerformingStartupCleanup &&
             activeCapture?.id != recording.id &&
             !jobQueue.isWorking(on: recording.id)
@@ -735,6 +1500,8 @@ final class AppModel: ObservableObject {
             historyErrorMessage = error.localizedDescription
         }
     }
+
+    // MARK: Finder and Imports
 
     func revealAudio(in recording: RecordingManifest) {
         do {
@@ -803,9 +1570,11 @@ final class AppModel: ObservableObject {
         return true
     }
 
+    // MARK: Credentials and Storage
+
     func saveDeepgramKey(_ key: String) -> Bool {
         do {
-            try keychain.saveDeepgramAPIKey(key)
+            try credentialAccess.saveAPIKey(key)
             refreshCredentialStatus()
             keychainErrorMessage = nil
             return true
@@ -817,7 +1586,7 @@ final class AppModel: ObservableObject {
 
     func removeDeepgramKey() {
         do {
-            try keychain.deleteDeepgramAPIKey()
+            try credentialAccess.removeAPIKey()
             refreshCredentialStatus()
             keychainErrorMessage = nil
         } catch {
@@ -830,7 +1599,7 @@ final class AppModel: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let storedKey: String?
         do {
-            storedKey = try keychain.deepgramAPIKey()?
+            storedKey = try credentialAccess.storedAPIKey()?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
             storedKey = nil
@@ -851,6 +1620,7 @@ final class AppModel: ObservableObject {
     }
 
     func refreshStorageUsage() {
+        guard !isPreparingToTerminate else { return }
         if isRefreshingStorage {
             storageRefreshPending = true
             return
@@ -859,11 +1629,13 @@ final class AppModel: ObservableObject {
         storageErrorMessage = nil
         isRefreshingStorage = true
         let store = self.store
-        Task {
+        storageRefreshTask = Task { [weak self] in
             let result = await Task.detached(priority: .utility) {
                 Result { try store.storageUsage() }
             }.value
+            guard let self, !Task.isCancelled else { return }
             isRefreshingStorage = false
+            storageRefreshTask = nil
             switch result {
             case .success(let usage):
                 storageUsage = usage
@@ -899,11 +1671,16 @@ final class AppModel: ObservableObject {
         storageErrorMessage = nil
         isForgettingHistory = true
         let store = self.store
-        Task {
+        forgetHistoryTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                isForgettingHistory = false
+                forgetHistoryTask = nil
+                completePendingTerminationIfReady()
+            }
             let result = await Task.detached(priority: .utility) {
                 Result { try store.forgetAllHistory() }
             }.value
-            isForgettingHistory = false
             switch result {
             case .success:
                 reloadHistory()
@@ -913,6 +1690,8 @@ final class AppModel: ObservableObject {
             }
         }
     }
+
+    // MARK: Preferences and Privacy
 
     func normalizeLocalSpeakerName() {
         localSpeakerName = RecordingManifest.normalizedLocalSpeakerName(localSpeakerName)
@@ -929,6 +1708,8 @@ final class AppModel: ObservableObject {
     func openSystemAudioPrivacySettings() {
         openPrivacySettings(anchor: "Privacy_ScreenCapture")
     }
+
+    // MARK: Termination
 
     func stopImmediatelyForTermination() {
         jobQueue.shutdownImmediately()
@@ -969,6 +1750,7 @@ final class AppModel: ObservableObject {
     func prepareForTermination(completion: @escaping @MainActor () -> Void) {
         isPreparingToTerminate = true
         terminationCompletion = completion
+        cancelDerivedRefreshesForTermination()
         jobQueue.suspendNewWork()
         switch captureState {
         case .ready:
@@ -982,6 +1764,40 @@ final class AppModel: ObservableObject {
             break
         }
     }
+
+    private func cancelDerivedRefreshesForTermination() {
+        microphoneRefreshTask?.cancel()
+        microphoneRefreshTask = nil
+
+        invalidateBackgroundHistoryReload()
+        pendingBackgroundCompletionIDs = []
+
+        transcriptLoadTask?.cancel()
+        transcriptLoadTask = nil
+        transcriptPriorityLoadTask?.cancel()
+        transcriptPriorityLoadTask = nil
+        transcriptLoadGeneration += 1
+
+        eligibilityTask?.cancel()
+        eligibilityTask = nil
+        eligibilityGeneration += 1
+
+        calendarRefreshTask?.cancel()
+        calendarRefreshTask = nil
+        calendarRefreshGeneration += 1
+        isRefreshingCalendar = false
+
+        meetingChoicesTask?.cancel()
+        meetingChoicesTask = nil
+        meetingChoicesGeneration += 1
+
+        storageRefreshTask?.cancel()
+        storageRefreshTask = nil
+        storageRefreshPending = false
+        isRefreshingStorage = false
+    }
+
+    // MARK: Capture Lifecycle Internals
 
     private func beginRecording() async {
         guard captureState == .starting else { return }
@@ -1067,6 +1883,31 @@ final class AppModel: ObservableObject {
             }
 
             let startedAt = Date()
+            let meetingChoice = meetingChoiceAtRecordingStart(startedAt)
+            recording.title = RecordingManifest.normalizedTitle(recordingTitle)
+            if recording.title != nil {
+                recording.titleSource = !recordingTitleWasEdited &&
+                    recording.title == RecordingManifest.normalizedTitle(calendarPrefilledTitle)
+                    ? .calendar
+                    : .user
+            }
+            recording.calendarCandidates = meetingChoice.candidates.isEmpty
+                ? nil
+                : meetingChoice.candidates
+            switch meetingChoice.state {
+            case .automatic, .manual:
+                if let event = meetingChoice.event {
+                    recording.assignMeeting(
+                        event,
+                        state: meetingChoice.state,
+                        updateCalendarTitle: false
+                    )
+                }
+            case .unresolved:
+                recording.markMeetingUnresolved(candidates: meetingChoice.candidates)
+            case .none:
+                recording.clearMeetingAssociation(keepCandidates: false)
+            }
             recording.captureStartedAt = startedAt
             recording.timeZoneIdentifier = TimeZone.current.identifier
             do {
@@ -1093,6 +1934,10 @@ final class AppModel: ObservableObject {
             captureStatistics = engine.statistics()
             fatalStopRequested = false
             captureState = captureStateMachine.state
+            recordingTitle = ""
+            recordingTitleWasEdited = false
+            calendarPrefilledTitle = nil
+            resetPendingMeetingChoice()
             startCapturePolling()
             reloadHistory()
         } catch {
@@ -1161,6 +2006,19 @@ final class AppModel: ObservableObject {
                 message: failureMessage
             )
         }
+        if recording.effectiveMeetingAssociationState == .unresolved,
+           let recordingStart = recording.captureStartedAt,
+           let resolvedEvent = CalendarEventMatchPolicy.resolveAfterRecording(
+               from: recording.calendarCandidates ?? [],
+               recordingStart: recordingStart,
+               recordingEnd: stoppedAt
+           ) {
+            recording.assignMeeting(
+                resolvedEvent,
+                state: .automatic,
+                updateCalendarTitle: true
+            )
+        }
         preparePublicationDestination(for: &recording)
         recording.captureStatus = .processing
         let saved = persist(recording)
@@ -1171,6 +2029,7 @@ final class AppModel: ObservableObject {
         activeCapture = nil
         resetCaptureTiming()
         _ = transitionCapture(.stopped)
+        refreshCalendarContext(reloadCalendars: false)
         resumeBackgroundWorkAfterCapture()
         reloadHistory()
         refreshStorageUsage()
@@ -1229,6 +2088,7 @@ final class AppModel: ObservableObject {
         resetCaptureTiming()
         isCancelling = false
         _ = transitionCapture(.stopped)
+        refreshCalendarContext(reloadCalendars: false)
         resumeBackgroundWorkAfterCapture()
         reloadHistory()
         refreshStorageUsage()
@@ -1244,15 +2104,23 @@ final class AppModel: ObservableObject {
         completePendingTerminationIfReady()
     }
 
+    // MARK: Imported Audio Internals
+
     private func transcribeAudio(_ url: URL) {
         guard url.isFileURL, canImportAudio else { return }
         isImportingAudio = true
         historyErrorMessage = nil
-        Task { await prepareImportedAudio(url) }
+        importedAudioTask = Task { [weak self] in
+            await self?.prepareImportedAudio(url)
+        }
     }
 
     private func prepareImportedAudio(_ audioURL: URL) async {
-        defer { isImportingAudio = false }
+        defer {
+            isImportingAudio = false
+            importedAudioTask = nil
+            completePendingTerminationIfReady()
+        }
         do {
             let metadata = try await Task.detached(priority: .userInitiated) {
                 try inspectImportedAudio(at: audioURL)
@@ -1299,8 +2167,10 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func resumeWaitingTranscriptions() {
-        guard !isRefreshingHistory else { return }
+    private func resumeWaitingTranscriptions(
+        allowDuringHistoryRefresh: Bool = false
+    ) {
+        guard allowDuringHistoryRefresh || !isRefreshingHistory else { return }
         do {
             for var recording in try store.loadAll()
             where recording.captureStatus == .complete &&
@@ -1338,6 +2208,8 @@ final class AppModel: ObservableObject {
                 .appendingPathComponent("Transcript.md").path
         }
     }
+
+    // MARK: Capture Monitoring
 
     private func startCapturePolling() {
         capturePollTask?.cancel()
@@ -1393,7 +2265,7 @@ final class AppModel: ObservableObject {
     private func completePendingTerminationIfReady() {
         guard isPreparingToTerminate,
               captureState == .ready,
-              !hasActiveTranscription
+              !hasPendingTerminationWork
         else { return }
         let completion = terminationCompletion
         terminationCompletion = nil
@@ -1416,6 +2288,8 @@ final class AppModel: ObservableObject {
             false
         }
     }
+
+    // MARK: Shared Helpers
 
     private func captureStartFailed(
         _ message: String,
@@ -1471,13 +2345,6 @@ final class AppModel: ObservableObject {
             !FileManager.default.isUbiquitousItem(at: existingURL)
     }
 
-    private static func needsAttention(_ recording: RecordingManifest) -> Bool {
-        recording.lastFailure != nil ||
-            recording.captureStatus == .failed ||
-            recording.transcriptionStatus == .failed ||
-            recording.transcriptionStatus == .waitingForCredential
-    }
-
     private enum Keys {
         static let microphoneUID = "selectedMicrophoneUID"
         static let language = "transcriptionLanguage"
@@ -1485,6 +2352,9 @@ final class AppModel: ObservableObject {
         static let keytermPromptingEnabled = "keytermPromptingEnabled"
         static let keytermsText = "keytermsText"
         static let outputDirectory = "outputDirectory"
+        static let calendarSuggestionsEnabled = "calendarSuggestionsEnabled"
+        static let selectedCalendarIDs = "selectedCalendarIDs"
+        static let calendarSelectionInitialized = "calendarSelectionInitialized"
     }
 
     private var parsedKeyterms: [String] {

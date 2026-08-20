@@ -1,15 +1,20 @@
 import Foundation
 @testable import CallRecorderCore
 
+@MainActor
 func runRecordingJobQueueTests() async throws {
     try await runAsyncTest("capture blocks queued transcription until capture ends") {
-        try await withQueueTemporaryDirectory { root in
+        try await withTemporaryDirectory(prefix: "CallRecorderQueueTests") { root in
             let store = RecordingStore(rootDirectory: root)
             let recording = try queuedTranscriptionRecording(in: store, root: root)
+            let providerCalls = SynchronousCounter()
             let transcribed = AsyncSignal()
-            let queue = await RecordingJobQueue(
+            let queue = RecordingJobQueue(
                 store: store,
-                apiKeyProvider: { "test-key" },
+                apiKeyProvider: {
+                    providerCalls.increment()
+                    return "test-key"
+                },
                 finalize: { _, _ in
                     throw TestFailure(description: "Unexpected finalization")
                 },
@@ -22,19 +27,20 @@ func runRecordingJobQueueTests() async throws {
                 }
             )
 
-            await queue.wake()
+            queue.wake()
+            try expectEqual(providerCalls.value, 0)
             try expectEqual(try store.load(id: recording.id).transcriptionStatus, .notStarted)
 
-            await queue.captureDidEnd()
-            await transcribed.wait()
+            queue.captureDidEnd()
+            try await transcribed.wait()
+            try expectEqual(providerCalls.value, 1)
 
-            try expectEqual(try store.load(id: recording.id).transcriptionStatus, .complete)
-            await queue.shutdownImmediately()
+            queue.shutdownImmediately()
         }
     }
 
     try await runAsyncTest("local transcript recovery never asks for a Deepgram key") {
-        try await withQueueTemporaryDirectory { root in
+        try await withTemporaryDirectory(prefix: "CallRecorderQueueTests") { root in
             let store = RecordingStore(rootDirectory: root.appendingPathComponent("history"))
             let recording = try queuedTranscriptionRecording(in: store, root: root)
             let response = Data(
@@ -45,7 +51,7 @@ func runRecordingJobQueueTests() async throws {
             )
             let providerCalls = SynchronousCounter()
             let completed = AsyncSignal()
-            let queue = await RecordingJobQueue(
+            let queue = RecordingJobQueue(
                 store: store,
                 apiKeyProvider: {
                     providerCalls.increment()
@@ -64,24 +70,152 @@ func runRecordingJobQueueTests() async throws {
                 }
             )
 
-            await queue.start()
-            await completed.wait()
+            queue.start()
+            try await completed.wait()
 
             try expectEqual(providerCalls.value, 0)
-            try expectEqual(try store.load(id: recording.id).transcriptionStatus, .complete)
-            await queue.shutdownImmediately()
+            queue.shutdownImmediately()
+        }
+    }
+
+    try await runAsyncTest("successful transcription publishes each activity transition once") {
+        try await withTemporaryDirectory(prefix: "CallRecorderQueueTests") { root in
+            let store = RecordingStore(rootDirectory: root)
+            let recording = try queuedTranscriptionRecording(in: store, root: root)
+            let completed = AsyncSignal()
+            let queueFinished = AsyncSignal()
+            let changes = SynchronousActivityRecorder()
+            let queue = RecordingJobQueue(
+                store: store,
+                apiKeyProvider: { "test-key" },
+                finalize: { _, _ in
+                    throw TestFailure(description: "Unexpected finalization")
+                },
+                transcribe: { original, store, _ in
+                    var updated = try store.load(id: original.id)
+                    updated.transcriptionStatus = .complete
+                    try store.save(updated)
+                    await completed.signal()
+                    return updated
+                }
+            )
+            queue.onChange = { activity in
+                changes.append(activity)
+                if activity == nil {
+                    Task { await queueFinished.signal() }
+                }
+            }
+
+            queue.start()
+            try await completed.wait()
+            try await queueFinished.wait()
+
+            try expectEqual(
+                changes.values,
+                [.transcribing(recording.id), nil]
+            )
+            queue.shutdownImmediately()
+        }
+    }
+
+    try await runAsyncTest("transcription claim spans preflight before activity is published") {
+        try await withTemporaryDirectory(prefix: "CallRecorderQueueTests") { root in
+            let store = RecordingStore(rootDirectory: root)
+            let recording = try queuedTranscriptionRecording(in: store, root: root)
+            let preflightStarted = AsyncSignal()
+            let releasePreflight = DispatchSemaphore(value: 0)
+            let transcribed = AsyncSignal()
+            let queueFinished = AsyncSignal()
+            let changes = SynchronousActivityRecorder()
+            let queue = RecordingJobQueue(
+                store: store,
+                apiKeyProvider: {
+                    Task { await preflightStarted.signal() }
+                    releasePreflight.wait()
+                    return "test-key"
+                },
+                finalize: { _, _ in
+                    throw TestFailure(description: "Unexpected finalization")
+                },
+                transcribe: { original, store, _ in
+                    var updated = try store.load(id: original.id)
+                    updated.transcriptionStatus = .complete
+                    try store.save(updated)
+                    await transcribed.signal()
+                    return updated
+                }
+            )
+            defer { releasePreflight.signal() }
+            queue.onChange = { activity in
+                changes.append(activity)
+                if activity == nil {
+                    Task { await queueFinished.signal() }
+                }
+            }
+
+            queue.start()
+            try await preflightStarted.wait()
+
+            let workingDuringPreflight = queue.isWorking(on: recording.id)
+            try expect(workingDuringPreflight)
+            try expectEqual(changes.values, [])
+
+            releasePreflight.signal()
+            try await transcribed.wait()
+            try await queueFinished.wait()
+
+            let workingAfterAttempt = queue.isWorking(on: recording.id)
+            try expect(!workingAfterAttempt)
+            try expectEqual(
+                changes.values,
+                [.transcribing(recording.id), nil]
+            )
+            queue.shutdownImmediately()
+        }
+    }
+
+    try await runAsyncTest("missing credential publishes its durable state once") {
+        try await withTemporaryDirectory(prefix: "CallRecorderQueueTests") { root in
+            let store = RecordingStore(rootDirectory: root)
+            let recording = try queuedTranscriptionRecording(in: store, root: root)
+            let changed = AsyncSignal()
+            let changes = SynchronousActivityRecorder()
+            let queue = RecordingJobQueue(
+                store: store,
+                apiKeyProvider: { nil },
+                finalize: { _, _ in
+                    throw TestFailure(description: "Unexpected finalization")
+                },
+                transcribe: { _, _, _ in
+                    throw TestFailure(description: "Unexpected transcription")
+                }
+            )
+            queue.onChange = { activity in
+                changes.append(activity)
+                Task { await changed.signal() }
+            }
+
+            queue.start()
+            try await changed.wait()
+
+            try expectEqual(changes.values, [nil])
+            try expectEqual(
+                try store.load(id: recording.id).transcriptionStatus,
+                .waitingForCredential
+            )
+            queue.shutdownImmediately()
         }
     }
 
     try await runAsyncTest("active transcription finishes during capture while new work waits") {
-        try await withQueueTemporaryDirectory { root in
+        try await withTemporaryDirectory(prefix: "CallRecorderQueueTests") { root in
             let store = RecordingStore(rootDirectory: root)
             let first = try queuedTranscriptionRecording(in: store, root: root)
             let started = AsyncSignal()
             let allowCompletion = AsyncSignal()
             let firstCompleted = AsyncSignal()
             let secondCompleted = AsyncSignal()
-            let queue = await RecordingJobQueue(
+            let queue = RecordingJobQueue(
                 store: store,
                 apiKeyProvider: { "test-key" },
                 finalize: { _, _ in
@@ -93,7 +227,7 @@ func runRecordingJobQueueTests() async throws {
                     try store.save(recording)
                     if original.id == first.id {
                         await started.signal()
-                        await allowCompletion.wait()
+                        try await allowCompletion.wait()
                     }
                     recording.transcriptionStatus = .complete
                     try store.save(recording)
@@ -106,49 +240,54 @@ func runRecordingJobQueueTests() async throws {
                 }
             )
 
-            await queue.start()
-            await started.wait()
-            await queue.suspendNewWork()
+            queue.start()
+            try await started.wait()
+            queue.suspendNewWork()
             let second = try queuedTranscriptionRecording(
                 in: store,
                 root: root,
                 folderName: "Call 2"
             )
             await allowCompletion.signal()
-            await firstCompleted.wait()
+            try await firstCompleted.wait()
 
-            try expectEqual(try store.load(id: first.id).transcriptionStatus, .complete)
             try expectEqual(try store.load(id: second.id).transcriptionStatus, .notStarted)
 
-            await queue.captureDidEnd()
-            await secondCompleted.wait()
-            try expectEqual(try store.load(id: second.id).transcriptionStatus, .complete)
-            await queue.shutdownImmediately()
+            queue.captureDidEnd()
+            try await secondCompleted.wait()
+            queue.shutdownImmediately()
         }
     }
 
     try await runAsyncTest("unexpected cancellation during capture fails without retrying") {
-        try await withQueueTemporaryDirectory { root in
+        try await withTemporaryDirectory(prefix: "CallRecorderQueueTests") { root in
             let store = RecordingStore(rootDirectory: root)
             let recording = try queuedTranscriptionRecording(in: store, root: root)
             let attempts = AsyncCounter()
             let started = AsyncSignal()
             let cancelRequest = AsyncSignal()
             let firstRunFinished = AsyncSignal()
-            let postCaptureRunFinished = AsyncSignal()
-            let queue = await RecordingJobQueue(
+            let secondCompleted = AsyncSignal()
+            let queue = RecordingJobQueue(
                 store: store,
                 apiKeyProvider: { "test-key" },
                 finalize: { _, _ in
                     throw TestFailure(description: "Unexpected finalization")
                 },
                 transcribe: { original, store, _ in
+                    if original.id != recording.id {
+                        var completed = try store.load(id: original.id)
+                        completed.transcriptionStatus = .complete
+                        try store.save(completed)
+                        await secondCompleted.signal()
+                        return completed
+                    }
                     await attempts.increment()
                     var active = try store.load(id: original.id)
                     active.transcriptionStatus = .transcribing
                     try store.save(active)
                     await started.signal()
-                    await cancelRequest.wait()
+                    try await cancelRequest.wait()
                     var queued = try store.load(id: original.id)
                     queued.transcriptionStatus = .notStarted
                     queued.lastFailure = nil
@@ -156,44 +295,40 @@ func runRecordingJobQueueTests() async throws {
                     throw CancellationError()
                 }
             )
-            await MainActor.run {
-                queue.onChange = { activity in
-                    if activity == nil {
-                        Task { await firstRunFinished.signal() }
-                    }
+            queue.onChange = { activity in
+                if activity == nil {
+                    Task { await firstRunFinished.signal() }
                 }
             }
 
-            await queue.start()
-            await started.wait()
-            await queue.suspendNewWork()
+            queue.start()
+            try await started.wait()
+            queue.suspendNewWork()
             await cancelRequest.signal()
-            await firstRunFinished.wait()
+            try await firstRunFinished.wait()
 
             var failed = try store.load(id: recording.id)
             try expectEqual(failed.transcriptionStatus, .failed)
             try expectEqual(failed.lastFailure?.stage, .transcription)
 
-            await MainActor.run {
-                queue.onChange = { activity in
-                    if activity == nil {
-                        Task { await postCaptureRunFinished.signal() }
-                    }
-                }
-            }
-            await queue.captureDidEnd()
-            await postCaptureRunFinished.wait()
+            _ = try queuedTranscriptionRecording(
+                in: store,
+                root: root,
+                folderName: "Call 2"
+            )
+            queue.captureDidEnd()
+            try await secondCompleted.wait()
 
             failed = try store.load(id: recording.id)
             let attemptCount = await attempts.value
             try expectEqual(failed.transcriptionStatus, .failed)
             try expectEqual(attemptCount, 1)
-            await queue.shutdownImmediately()
+            queue.shutdownImmediately()
         }
     }
 
     try await runAsyncTest("active finalization finishes during capture without starting transcription") {
-        try await withQueueTemporaryDirectory { root in
+        try await withTemporaryDirectory(prefix: "CallRecorderQueueTests") { root in
             let store = RecordingStore(rootDirectory: root.appendingPathComponent("history"))
             var recording = try store.createRecording(
                 language: .english,
@@ -211,17 +346,18 @@ func runRecordingJobQueueTests() async throws {
             let allowFinalization = AsyncSignal()
             let finalizationPersisted = AsyncSignal()
             let transcriptionCompleted = AsyncSignal()
+            let changes = SynchronousActivityRecorder()
             let publication = PublishedRecordingAudio(
                 directoryURL: output,
                 audioURL: output.appendingPathComponent("Audio.m4a"),
                 durationSeconds: 12
             )
-            let queue = await RecordingJobQueue(
+            let queue = RecordingJobQueue(
                 store: store,
                 apiKeyProvider: { "test-key" },
                 finalize: { _, _ in
                     await finalizationStarted.signal()
-                    await allowFinalization.wait()
+                    try await allowFinalization.wait()
                     return RecordingPostProcessingResult(
                         publication: publication,
                         warnings: []
@@ -235,30 +371,29 @@ func runRecordingJobQueueTests() async throws {
                     return updated
                 }
             )
-            await MainActor.run {
-                queue.onChange = { _ in
-                    if (try? store.load(id: recordingID).captureStatus) == .complete {
-                        Task { await finalizationPersisted.signal() }
-                    }
+            queue.onChange = { activity in
+                changes.append(activity)
+                if (try? store.load(id: recordingID).captureStatus) == .complete {
+                    Task { await finalizationPersisted.signal() }
                 }
             }
 
-            await queue.start()
-            await finalizationStarted.wait()
-            await queue.suspendNewWork()
+            queue.start()
+            try await finalizationStarted.wait()
+            queue.suspendNewWork()
             await allowFinalization.signal()
-            await finalizationPersisted.wait()
+            try await finalizationPersisted.wait()
 
             try expectEqual(try store.load(id: recordingID).transcriptionStatus, .notStarted)
-            await queue.captureDidEnd()
-            await transcriptionCompleted.wait()
-            try expectEqual(try store.load(id: recordingID).transcriptionStatus, .complete)
-            await queue.shutdownImmediately()
+            try expectEqual(changes.values, [.finishingAudio(recordingID), nil])
+            queue.captureDidEnd()
+            try await transcriptionCompleted.wait()
+            queue.shutdownImmediately()
         }
     }
 
-    try await runAsyncTest("crash recovery finalizes and remains eligible for transcription") {
-        try await withQueueTemporaryDirectory { root in
+    try await runAsyncTest("queue resumes recovered finalization before transcription") {
+        try await withTemporaryDirectory(prefix: "CallRecorderQueueTests") { root in
             let store = RecordingStore(rootDirectory: root.appendingPathComponent("history"))
             let recording = try store.createRecording(
                 language: .english,
@@ -273,7 +408,7 @@ func runRecordingJobQueueTests() async throws {
             let output = root.appendingPathComponent("Recovered Call", isDirectory: true)
             let audio = output.appendingPathComponent("Audio.m4a")
             let transcribed = AsyncSignal()
-            let queue = await RecordingJobQueue(
+            let queue = RecordingJobQueue(
                 store: store,
                 apiKeyProvider: { "test-key" },
                 finalize: { _, _ in
@@ -300,19 +435,18 @@ func runRecordingJobQueueTests() async throws {
                 }
             )
 
-            await queue.start()
-            await transcribed.wait()
+            queue.start()
+            try await transcribed.wait()
 
             let recovered = try store.load(id: recording.id)
             try expectEqual(recovered.captureStatus, .complete)
-            try expectEqual(recovered.transcriptionStatus, .complete)
             try expect(recovered.lastFailure == nil)
-            await queue.shutdownImmediately()
+            queue.shutdownImmediately()
         }
     }
 
     try await runAsyncTest("failed work is attempted once per queue run") {
-        try await withQueueTemporaryDirectory { root in
+        try await withTemporaryDirectory(prefix: "CallRecorderQueueTests") { root in
             let store = RecordingStore(rootDirectory: root)
             var recording = try store.createRecording(
                 language: .english,
@@ -329,7 +463,7 @@ func runRecordingJobQueueTests() async throws {
                     throw TestFailure(description: "Unexpected upload")
                 }
             )
-            let queue = await RecordingJobQueue(
+            let queue = RecordingJobQueue(
                 store: store,
                 apiKeyProvider: { "test-key" },
                 finalize: { _, _ in
@@ -344,27 +478,25 @@ func runRecordingJobQueueTests() async throws {
                     )
                 }
             )
-            await MainActor.run {
-                queue.onChange = { activity in
-                    if activity == nil {
-                        Task { await runnerFinished.signal() }
-                    }
+            queue.onChange = { activity in
+                if activity == nil {
+                    Task { await runnerFinished.signal() }
                 }
             }
 
-            await queue.start()
-            await runnerFinished.wait()
+            queue.start()
+            try await runnerFinished.wait()
 
             try expectEqual(await attempts.value, 1)
             let failed = try store.load(id: recording.id)
             try expectEqual(failed.transcriptionStatus, .failed)
             try expectEqual(failed.lastFailure?.stage, .transcription)
-            await queue.shutdownImmediately()
+            queue.shutdownImmediately()
         }
     }
 
     try await runAsyncTest("finalization retry preserves a genuine capture failure") {
-        try await withQueueTemporaryDirectory { root in
+        try await withTemporaryDirectory(prefix: "CallRecorderQueueTests") { root in
             let store = RecordingStore(rootDirectory: root.appendingPathComponent("history"))
             var recording = try store.createRecording(
                 language: .english,
@@ -385,7 +517,7 @@ func runRecordingJobQueueTests() async throws {
             let transcriptionAttempts = AsyncCounter()
             let firstRunFinished = AsyncSignal()
             let secondRunFinished = AsyncSignal()
-            let queue = await RecordingJobQueue(
+            let queue = RecordingJobQueue(
                 store: store,
                 apiKeyProvider: { "test-key" },
                 finalize: { _, _ in
@@ -411,16 +543,14 @@ func runRecordingJobQueueTests() async throws {
                     return recording
                 }
             )
-            await MainActor.run {
-                queue.onChange = { activity in
-                    if activity == nil {
-                        Task { await firstRunFinished.signal() }
-                    }
+            queue.onChange = { activity in
+                if activity == nil {
+                    Task { await firstRunFinished.signal() }
                 }
             }
 
-            await queue.start()
-            await firstRunFinished.wait()
+            queue.start()
+            try await firstRunFinished.wait()
 
             var partial = try store.load(id: recording.id)
             try expectEqual(partial.captureStatus, .failed)
@@ -436,15 +566,13 @@ func runRecordingJobQueueTests() async throws {
 
             partial.captureStatus = .processing
             try store.save(partial)
-            await MainActor.run {
-                queue.onChange = { activity in
-                    if activity == nil {
-                        Task { await secondRunFinished.signal() }
-                    }
+            queue.onChange = { activity in
+                if activity == nil {
+                    Task { await secondRunFinished.signal() }
                 }
             }
-            await queue.wake()
-            await secondRunFinished.wait()
+            queue.wake()
+            try await secondRunFinished.wait()
 
             partial = try store.load(id: recording.id)
             let transcriptionAttemptCount = await transcriptionAttempts.value
@@ -454,28 +582,26 @@ func runRecordingJobQueueTests() async throws {
             try expectEqual(partial.files.audio, audio.path)
             try expectEqual(transcriptionAttemptCount, 0)
             try expectEqual(finalizationAttemptCount, 2)
-            await queue.shutdownImmediately()
+            queue.shutdownImmediately()
         }
     }
 }
 
 private actor AsyncSignal {
     private var signaled = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
 
-    func wait() async {
-        if signaled { return }
-        await withCheckedContinuation { continuation in
-            waiters.append(continuation)
+    func wait(timeout: Duration = .seconds(10)) async throws {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while !signaled {
+            guard ContinuousClock.now < deadline else {
+                throw TestFailure(description: "Timed out waiting for an asynchronous signal")
+            }
+            try await Task.sleep(for: .milliseconds(10))
         }
     }
 
     func signal() {
-        guard !signaled else { return }
         signaled = true
-        let continuations = waiters
-        waiters.removeAll()
-        continuations.forEach { $0.resume() }
     }
 }
 
@@ -502,6 +628,19 @@ private final class SynchronousCounter: @unchecked Sendable {
 
     func increment() {
         lock.withLock { count += 1 }
+    }
+}
+
+private final class SynchronousActivityRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedValues: [RecordingJobActivity?] = []
+
+    var values: [RecordingJobActivity?] {
+        lock.withLock { recordedValues }
+    }
+
+    func append(_ activity: RecordingJobActivity?) {
+        lock.withLock { recordedValues.append(activity) }
     }
 }
 
@@ -544,14 +683,4 @@ private func writeQueueClosedCapture(
             try Data([1]).write(to: chunk)
         }
     }
-}
-
-private func withQueueTemporaryDirectory(
-    _ body: (URL) async throws -> Void
-) async throws {
-    let root = FileManager.default.temporaryDirectory
-        .appendingPathComponent("CallRecorderQueueTests-\(UUID().uuidString)", isDirectory: true)
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: root) }
-    try await body(root)
 }

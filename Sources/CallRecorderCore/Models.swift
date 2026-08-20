@@ -41,6 +41,18 @@ public enum RecordingTimestampSource: String, Codable, Sendable {
     case importTime = "import_time"
 }
 
+public enum RecordingTitleSource: String, Codable, Sendable {
+    case calendar
+    case user
+}
+
+public enum MeetingAssociationState: String, Codable, Sendable {
+    case automatic
+    case manual
+    case unresolved
+    case none
+}
+
 public enum FailureStage: String, Codable, Sendable {
     case capture
     case finalization
@@ -129,6 +141,18 @@ public struct RecordingFiles: Codable, Equatable, Sendable {
     }
 }
 
+public struct SpeakerLabel: Codable, Equatable, Sendable {
+    public var channel: Int
+    public var speaker: Int
+    public var displayName: String
+
+    public init(channel: Int, speaker: Int, displayName: String) {
+        self.channel = channel
+        self.speaker = speaker
+        self.displayName = displayName
+    }
+}
+
 public struct RecordingManifest: Codable, Equatable, Identifiable, Sendable {
     public static let currentVersion = 1
     public static let defaultLocalSpeakerName = "Me"
@@ -143,10 +167,20 @@ public struct RecordingManifest: Codable, Equatable, Identifiable, Sendable {
     public var durationSeconds: Double?
     public var origin: RecordingOrigin?
     public var timestampSource: RecordingTimestampSource?
+    public var title: String?
+    public var titleSource: RecordingTitleSource?
+    public var meetingAssociationState: MeetingAssociationState?
+    public var calendarCandidates: [CalendarEventCandidate]?
+    public var calendarEventIdentifier: String?
+    public var calendarTitle: String?
+    public var calendarStartDate: Date?
+    public var calendarEndDate: Date?
+    public var calendarAttendeeNames: [String]?
     public var language: RecordingLanguage
     public var microphoneUID: String
     public var microphoneName: String
     public var localSpeakerName: String?
+    public var speakerLabels: [SpeakerLabel]?
     public var keyterms: [String]?
     public var captureStatus: CaptureStatus
     public var transcriptionStatus: TranscriptionStatus
@@ -177,10 +211,20 @@ public struct RecordingManifest: Codable, Equatable, Identifiable, Sendable {
         durationSeconds = nil
         origin = .nativeRecording
         timestampSource = .captureClock
+        title = nil
+        titleSource = nil
+        meetingAssociationState = nil
+        calendarCandidates = nil
+        calendarEventIdentifier = nil
+        calendarTitle = nil
+        calendarStartDate = nil
+        calendarEndDate = nil
+        calendarAttendeeNames = nil
         self.language = language
         self.microphoneUID = microphoneUID
         self.microphoneName = microphoneName
         self.localSpeakerName = localSpeakerName
+        speakerLabels = nil
         self.keyterms = keyterms
         captureStatus = .recording
         transcriptionStatus = .notStarted
@@ -194,7 +238,100 @@ public struct RecordingManifest: Codable, Equatable, Identifiable, Sendable {
     }
 
     public var displayTitle: String {
-        (captureStartedAt ?? createdAt).formatted(date: .abbreviated, time: .shortened)
+        if let title = Self.normalizedTitle(title) ?? Self.normalizedTitle(calendarTitle) {
+            return title
+        }
+        if let importedSourceFilename {
+            return URL(fileURLWithPath: importedSourceFilename)
+                .deletingPathExtension()
+                .lastPathComponent
+        }
+        return "Untitled recording"
+    }
+
+    public var effectiveMeetingAssociationState: MeetingAssociationState {
+        if let meetingAssociationState { return meetingAssociationState }
+        return calendarEventIdentifier == nil ? .none : .automatic
+    }
+
+    public var effectiveTitleSource: RecordingTitleSource? {
+        if let titleSource { return titleSource }
+        guard let normalizedTitle = Self.normalizedTitle(title) else { return nil }
+        if normalizedTitle == Self.normalizedTitle(calendarTitle) { return .calendar }
+        return .user
+    }
+
+    public var assignedCalendarEvent: CalendarEventCandidate? {
+        guard let identifier = calendarEventIdentifier,
+              let title = calendarTitle,
+              let startDate = calendarStartDate,
+              let endDate = calendarEndDate
+        else { return nil }
+        return CalendarEventCandidate(
+            identifier: identifier,
+            title: title,
+            startDate: startDate,
+            endDate: endDate,
+            attendeeNames: calendarAttendeeNames ?? []
+        )
+    }
+
+    public mutating func assignMeeting(
+        _ event: CalendarEventCandidate,
+        state: MeetingAssociationState,
+        updateCalendarTitle: Bool
+    ) {
+        precondition(state == .automatic || state == .manual)
+        let shouldUpdateTitle = updateCalendarTitle &&
+            (title == nil || effectiveTitleSource == .calendar)
+        calendarEventIdentifier = event.identifier
+        calendarTitle = Self.normalizedTitle(event.title)
+        calendarStartDate = event.startDate
+        calendarEndDate = event.endDate
+        calendarAttendeeNames = event.attendeeNames
+        meetingAssociationState = state
+        var candidates = calendarCandidates ?? []
+        candidates.removeAll { $0.identifier == event.identifier }
+        candidates.append(event)
+        calendarCandidates = candidates.sorted { $0.startDate < $1.startDate }
+        if shouldUpdateTitle {
+            title = calendarTitle
+            titleSource = title == nil ? nil : .calendar
+        }
+    }
+
+    public mutating func markMeetingUnresolved(
+        candidates: [CalendarEventCandidate]
+    ) {
+        clearAssignedMeeting()
+        meetingAssociationState = .unresolved
+        calendarCandidates = candidates.isEmpty ? nil : candidates
+    }
+
+    public mutating func clearMeetingAssociation(keepCandidates: Bool = false) {
+        let shouldClearTitle = effectiveTitleSource == .calendar
+        clearAssignedMeeting()
+        meetingAssociationState = MeetingAssociationState.none
+        if !keepCandidates { calendarCandidates = nil }
+        if shouldClearTitle {
+            title = nil
+            titleSource = nil
+        }
+    }
+
+    private mutating func clearAssignedMeeting() {
+        calendarEventIdentifier = nil
+        calendarTitle = nil
+        calendarStartDate = nil
+        calendarEndDate = nil
+        calendarAttendeeNames = nil
+    }
+
+    public static func normalizedTitle(_ value: String?) -> String? {
+        let words = (value ?? "").split(whereSeparator: { $0.isWhitespace })
+        let normalized = words.joined(separator: " ")
+        guard !normalized.isEmpty else { return nil }
+        return String(normalized.prefix(120))
     }
 
     public var importedSourceFilename: String? {
@@ -232,8 +369,66 @@ public struct RecordingManifest: Codable, Equatable, Identifiable, Sendable {
         return String(normalized.prefix(64))
     }
 
+    public func speakerDisplayName(channel: Int, speaker: Int?) -> String {
+        if effectiveOrigin == .nativeRecording, channel == 1 {
+            return effectiveLocalSpeakerName
+        }
+        let speaker = speaker ?? 0
+        if let customName = speakerLabels?.first(where: {
+            $0.channel == channel && $0.speaker == speaker
+        }).flatMap({ Self.normalizedSpeakerName($0.displayName) }) {
+            return customName
+        }
+        if effectiveOrigin == .importedAudio, channel > 0 {
+            return "Channel \(channel) · Speaker \(speaker)"
+        }
+        return "Speaker \(speaker)"
+    }
+
+    public mutating func setSpeakerName(
+        _ value: String?,
+        channel: Int,
+        speaker: Int?
+    ) {
+        let speaker = speaker ?? 0
+        var labels = speakerLabels ?? []
+        labels.removeAll { $0.channel == channel && $0.speaker == speaker }
+        if let normalized = Self.normalizedSpeakerName(value) {
+            labels.append(
+                SpeakerLabel(channel: channel, speaker: speaker, displayName: normalized)
+            )
+        }
+        speakerLabels = labels.isEmpty ? nil : labels.sorted {
+            if $0.channel == $1.channel { return $0.speaker < $1.speaker }
+            return $0.channel < $1.channel
+        }
+    }
+
+    public static func normalizedSpeakerName(_ value: String?) -> String? {
+        let words = (value ?? "").split(whereSeparator: { $0.isWhitespace })
+        let normalized = words.joined(separator: " ")
+        guard !normalized.isEmpty else { return nil }
+        return String(normalized.prefix(64))
+    }
+
     public var effectiveKeyterms: [String] {
         DeepgramKeyterms.limited(keyterms ?? [])
+    }
+
+    public var hasFailure: Bool {
+        lastFailure != nil ||
+            captureStatus == .failed ||
+            transcriptionStatus == .failed
+    }
+
+    public var isProcessing: Bool {
+        captureStatus == .processing || transcriptionStatus == .transcribing
+    }
+
+    public var requiresAttention: Bool {
+        transcriptionStatus == .waitingForCredential ||
+            hasFailure ||
+            captureHealthSummary != nil
     }
 
     public func audioStatusText(hasRecoveryAudio: Bool) -> String {

@@ -10,16 +10,18 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            Section("Recording") {
-                if !model.canChangeCaptureConfiguration {
+            if !model.canChangeCaptureConfiguration {
+                Section {
                     Label(
-                        "Stop recording to change these settings.",
+                        "Recording, Calendar, and transcription-accuracy settings are locked until capture stops.",
                         systemImage: "lock.fill"
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 }
+            }
 
+            Section("Recording") {
                 Picker("Microphone", selection: $model.selectedMicrophoneUID) {
                     Text(model.automaticMicrophoneLabel)
                         .tag(AppModel.automaticMicrophoneUID)
@@ -68,16 +70,27 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Transcription accuracy") {
-                if !model.canChangeCaptureConfiguration {
-                    Label(
-                        "Stop recording to change these settings.",
-                        systemImage: "lock.fill"
+            Section("Calendar") {
+                Toggle(
+                    "Use Calendar for meeting context",
+                    isOn: Binding(
+                        get: { model.calendarSuggestionsEnabled },
+                        set: { model.setCalendarSuggestionsEnabled($0) }
                     )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                )
+                .disabled(!model.canChangeCaptureConfiguration)
+
+                if model.calendarSuggestionsEnabled {
+                    calendarAccessContent
+                        .disabled(!model.canChangeCaptureConfiguration)
                 }
 
+                Text("Calendar data stays on this Mac. Call Recorder reads selected calendars to suggest a meeting title and may retain the matched meeting time and attendee names in private app history. It never starts a recording or changes an event.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Transcription accuracy") {
                 Toggle(
                     "Improve names and jargon (paid Deepgram add-on)",
                     isOn: $model.keytermPromptingEnabled
@@ -123,19 +136,24 @@ struct SettingsView: View {
                         credentialStatusText
                     )
                 }
-                SecureField("New Deepgram API key", text: $newAPIKey)
-                    .textContentType(.password)
-                HStack {
-                    Button("Save Key") {
-                        if model.saveDeepgramKey(newAPIKey) {
-                            newAPIKey = ""
+                if model.canPersistDeepgramKey {
+                    SecureField("New Deepgram API key", text: $newAPIKey)
+                        .textContentType(.password)
+                    HStack {
+                        Button("Save Key") {
+                            if model.saveDeepgramKey(newAPIKey) {
+                                newAPIKey = ""
+                            }
                         }
+                        .disabled(newAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        Button("Remove Keychain Key", role: .destructive) {
+                            showingRemoveKeyConfirmation = true
+                        }
+                        .disabled(!model.hasStoredDeepgramKey)
                     }
-                    .disabled(newAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    Button("Remove Keychain Key", role: .destructive) {
-                        showingRemoveKeyConfirmation = true
-                    }
-                    .disabled(!model.hasStoredDeepgramKey)
+                } else {
+                    Label("Keychain disabled for this development build", systemImage: "hammer")
+                        .foregroundStyle(.secondary)
                 }
                 Text(credentialDetailText)
                     .font(.caption)
@@ -159,16 +177,18 @@ struct SettingsView: View {
                 Text("Private history includes saved Deepgram responses used to recreate transcripts without another paid upload. Recovery data is temporary audio retained after an interruption or failed save.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                HStack {
-                    Button("Open App Data Folder") { model.openAppDataFolder() }
-                    Button("Refresh") { model.refreshStorageUsage() }
-                        .disabled(model.isRefreshingStorage)
-                    if model.isRefreshingStorage {
-                        ProgressView()
-                            .controlSize(.small)
-                            .accessibilityLabel("Refreshing storage usage")
+                ViewThatFits(in: .horizontal) {
+                    HStack {
+                        Button("Open App Data Folder") { model.openAppDataFolder() }
+                        refreshStorageButton
                     }
-                    Spacer()
+                    VStack(alignment: .leading, spacing: 8) {
+                        Button("Open App Data Folder") { model.openAppDataFolder() }
+                        refreshStorageButton
+                    }
+                }
+                Divider()
+                VStack(alignment: .leading, spacing: 6) {
                     Button(role: .destructive) {
                         showingForgetHistoryConfirmation = true
                     } label: {
@@ -183,11 +203,11 @@ struct SettingsView: View {
                         }
                     }
                     .disabled(!model.canForgetHistory)
-                }
-                if let reason = model.forgetHistoryUnavailableReason {
-                    Text(reason)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    if let reason = model.forgetHistoryUnavailableReason {
+                        Text(reason)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 if let error = model.storageErrorMessage {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
@@ -209,9 +229,10 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .padding()
         .onAppear {
-            model.refreshMicrophones()
+            model.refreshMicrophonesAsync()
             model.refreshCredentialStatus()
             model.refreshStorageUsage()
+            model.refreshCalendarContextIfStale()
         }
         .onDisappear {
             newAPIKey = ""
@@ -243,8 +264,107 @@ struct SettingsView: View {
         }
     }
 
+    @ViewBuilder
+    private var calendarAccessContent: some View {
+        switch model.calendarAccessState {
+        case .fullAccess:
+            Label("Calendar access granted", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+
+            if model.availableCalendars.isEmpty {
+                Text("No event calendars are available.")
+                    .foregroundStyle(.secondary)
+            } else {
+                DisclosureGroup {
+                    ForEach(model.availableCalendars) { calendar in
+                        Toggle(
+                            isOn: Binding(
+                                get: { model.calendarIsSelected(calendar) },
+                                set: { model.setCalendar(calendar, selected: $0) }
+                            )
+                        ) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(calendar.title)
+                                Text(calendar.sourceTitle)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                } label: {
+                    HStack {
+                        Text("Calendars")
+                        Spacer()
+                        Text("\(selectedCalendarCount) of \(model.availableCalendars.count) selected")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                }
+            }
+
+            Button("Refresh Calendar") {
+                model.refreshCalendarContext()
+            }
+            .disabled(model.isRefreshingCalendar)
+        case .notDetermined:
+            Button("Allow Calendar Access…") {
+                model.refreshCalendarContext(requestAccess: true)
+            }
+            .disabled(model.isRefreshingCalendar)
+        case .denied, .restricted, .writeOnly:
+            Label(
+                "Call Recorder cannot read calendar events.",
+                systemImage: "calendar.badge.exclamationmark"
+            )
+            .foregroundStyle(.orange)
+            Button("Calendar Privacy Settings") {
+                model.openCalendarPrivacySettings()
+            }
+        case .unavailable:
+            Label("Calendar access is unavailable.", systemImage: "calendar.badge.exclamationmark")
+                .foregroundStyle(.secondary)
+        }
+
+        if model.isRefreshingCalendar {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Checking Calendar…")
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        if let error = model.calendarErrorMessage {
+            Label(error, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.red)
+        }
+    }
+
+    @ViewBuilder
+    private var refreshStorageButton: some View {
+        HStack(spacing: 8) {
+            Button("Refresh") { model.refreshStorageUsage() }
+                .disabled(model.isRefreshingStorage)
+            if model.isRefreshingStorage {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("Refreshing storage usage")
+            }
+        }
+    }
+
+    private var selectedCalendarCount: Int {
+        model.availableCalendars.lazy.filter(model.calendarIsSelected).count
+    }
+
     private var credentialStatusText: String {
-        switch model.deepgramCredentialSource {
+        if !model.canPersistDeepgramKey {
+            return model.deepgramCredentialSource == .environment
+                ? "Deepgram key ready from development environment"
+                : "Development mode"
+        }
+        return switch model.deepgramCredentialSource {
         case .environment: "Deepgram key ready from environment"
         case .keychain: "Deepgram key ready from Keychain"
         case .none: "Add a Deepgram API key to transcribe recordings"
@@ -252,7 +372,12 @@ struct SettingsView: View {
     }
 
     private var credentialDetailText: String {
-        switch model.deepgramCredentialSource {
+        if !model.canPersistDeepgramKey {
+            return model.deepgramCredentialSource == .environment
+                ? "This development build uses DEEPGRAM_API_KEY for this process and never reads or writes Keychain."
+                : "This development build never reads or writes Keychain. Set DEEPGRAM_API_KEY before launch only when live transcription testing is needed."
+        }
+        return switch model.deepgramCredentialSource {
         case .environment:
             "DEEPGRAM_API_KEY currently takes precedence. A key saved here is stored in Keychain and never written to recording files."
         case .keychain:

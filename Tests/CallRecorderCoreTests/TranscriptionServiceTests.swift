@@ -1,9 +1,10 @@
 import Foundation
 @testable import CallRecorderCore
 
+@MainActor
 func runTranscriptionServiceTests() async throws {
     try await runAsyncTest("transcription publishes only Markdown beside retained audio") {
-        try await withTranscriptionTemporaryDirectory { root in
+        try await withTemporaryDirectory(prefix: "CallRecorderTranscriptionTests") { root in
             let response = Data(
                 """
                 {
@@ -90,7 +91,7 @@ func runTranscriptionServiceTests() async throws {
     }
 
     try await runAsyncTest("failed transcription preserves audio and remains retryable") {
-        try await withTranscriptionTemporaryDirectory { root in
+        try await withTemporaryDirectory(prefix: "CallRecorderTranscriptionTests") { root in
             let client = DeepgramClient { _, _ in
                 throw URLError(.notConnectedToInternet)
             }
@@ -112,31 +113,33 @@ func runTranscriptionServiceTests() async throws {
                 .appendingPathComponent("Transcript.md").path
             try store.save(recording)
 
-            do {
-                _ = try await TranscriptionService(client: client).transcribe(
+            try await expectThrows(
+                DeepgramError.self,
+                matching: {
+                    if case .transport = $0 { return true }
+                    return false
+                }
+            ) {
+                try await TranscriptionService(client: client).transcribe(
                     recording: recording,
                     store: store,
                     apiKey: "test-key"
                 )
-                throw TestFailure(description: "Expected transcription to fail")
-            } catch is TestFailure {
-                throw TestFailure(description: "Expected transcription to fail")
-            } catch {
-                let failed = try require(try store.loadAll().first)
-                try expectEqual(failed.transcriptionStatus, .failed)
-                try expect(TranscriptionRetryPolicy.canRetry(failed))
-                try expect(FileManager.default.fileExists(atPath: audioURL.path))
-                try expect(
-                    !FileManager.default.fileExists(
-                        atPath: publicDirectory.appendingPathComponent("Transcript.md").path
-                    )
-                )
             }
+            let failed = try require(try store.loadAll().first)
+            try expectEqual(failed.transcriptionStatus, .failed)
+            try expect(TranscriptionRetryPolicy.canRetry(failed))
+            try expect(FileManager.default.fileExists(atPath: audioURL.path))
+            try expect(
+                !FileManager.default.fileExists(
+                    atPath: publicDirectory.appendingPathComponent("Transcript.md").path
+                )
+            )
         }
     }
 
     try await runAsyncTest("successful Deepgram JSON is retained before app-side parsing") {
-        try await withTranscriptionTemporaryDirectory { root in
+        try await withTemporaryDirectory(prefix: "CallRecorderTranscriptionTests") { root in
             let response = Data("{\"unexpected\":true}".utf8)
             let client = DeepgramClient { request, _ in
                 let url = try require(request.url)
@@ -164,16 +167,13 @@ func runTranscriptionServiceTests() async throws {
                 .appendingPathComponent("Transcript.md").path
             try store.save(recording)
 
-            do {
-                _ = try await TranscriptionService(client: client).transcribe(
+            try await expectThrows(DecodingError.self) {
+                try await TranscriptionService(client: client).transcribe(
                     recording: recording,
                     store: store,
                     apiKey: "test-key"
                 )
-                throw TestFailure(description: "Expected local parsing to fail")
-            } catch is TestFailure {
-                throw TestFailure(description: "Expected local parsing to fail")
-            } catch {}
+            }
 
             let retained = try store.load(id: recording.id)
             try expectEqual(retained.transcriptionStatus, .failed)
@@ -184,22 +184,19 @@ func runTranscriptionServiceTests() async throws {
             let noUploadClient = DeepgramClient { _, _ in
                 throw TestFailure(description: "Retained JSON must not upload again")
             }
-            do {
-                _ = try await TranscriptionService(client: noUploadClient).transcribe(
+            try await expectThrows(DecodingError.self) {
+                try await TranscriptionService(client: noUploadClient).transcribe(
                     recording: retained,
                     store: store,
                     apiKey: ""
                 )
-                throw TestFailure(description: "Expected retained JSON parsing to fail")
-            } catch let failure as TestFailure {
-                throw failure
-            } catch {}
+            }
             try expectEqual(try store.load(id: recording.id).transcriptionAttempts, 1)
         }
     }
 
     try await runAsyncTest("cancelled transcription requires an explicit retry") {
-        try await withTranscriptionTemporaryDirectory { root in
+        try await withTemporaryDirectory(prefix: "CallRecorderTranscriptionTests") { root in
             let client = DeepgramClient { _, _ in
                 throw URLError(.cancelled)
             }
@@ -242,7 +239,7 @@ func runTranscriptionServiceTests() async throws {
     }
 
     try await runAsyncTest("saved Deepgram response recreates Markdown without key or upload") {
-        try await withTranscriptionTemporaryDirectory { root in
+        try await withTemporaryDirectory(prefix: "CallRecorderTranscriptionTests") { root in
             let response = Data(
                 "{\"results\":{\"channels\":[{\"alternatives\":[{\"transcript\":\"Recovered\",\"words\":[]}]}]}}".utf8
             )
@@ -291,7 +288,7 @@ func runTranscriptionServiceTests() async throws {
     }
 
     try await runAsyncTest("imported transcription does not overwrite an existing Markdown file") {
-        try await withTranscriptionTemporaryDirectory { root in
+        try await withTemporaryDirectory(prefix: "CallRecorderTranscriptionTests") { root in
             let response = Data(
                 """
                 {"results":{"channels":[{"alternatives":[{"transcript":"Hello","words":[]}]}]}}
@@ -312,7 +309,8 @@ func runTranscriptionServiceTests() async throws {
             let store = RecordingStore(rootDirectory: root.appendingPathComponent("history"))
             let audioURL = root.appendingPathComponent("meeting.m4a")
             let existingTranscript = root.appendingPathComponent("meeting.md")
-            try Data([0, 1, 2, 3]).write(to: audioURL)
+            let sourceAudio = Data([0, 1, 2, 3])
+            try sourceAudio.write(to: audioURL)
             try Data("keep me".utf8).write(to: existingTranscript)
 
             var recording = try store.createRecording(
@@ -337,19 +335,11 @@ func runTranscriptionServiceTests() async throws {
                 try String(contentsOf: existingTranscript, encoding: .utf8),
                 "keep me"
             )
+            try expectEqual(try Data(contentsOf: audioURL), sourceAudio)
             let published = try require(try store.transcriptURL(for: completed))
             try expectEqual(published.lastPathComponent, "meeting (2).md")
+            try expectEqual(published.deletingLastPathComponent(), audioURL.deletingLastPathComponent())
             try expect(FileManager.default.fileExists(atPath: published.path))
         }
     }
-}
-
-private func withTranscriptionTemporaryDirectory(
-    _ body: (URL) async throws -> Void
-) async throws {
-    let url = FileManager.default.temporaryDirectory
-        .appendingPathComponent("CallRecorderTranscriptionTests-\(UUID().uuidString)", isDirectory: true)
-    try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: url) }
-    try await body(url)
 }

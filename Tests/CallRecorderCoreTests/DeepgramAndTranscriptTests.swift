@@ -1,6 +1,7 @@
 import Foundation
 @testable import CallRecorderCore
 
+@MainActor
 func runDeepgramAndTranscriptTests() throws {
     try runTest("prerecorded request uses current required options") {
         let request = try DeepgramRequestFactory.makeRequest(
@@ -25,6 +26,7 @@ func runDeepgramAndTranscriptTests() throws {
         try expectEqual(query["mip_opt_out"], "true")
         try expectEqual(query["tag"], "call-recorder")
         try expect(query["diarize"] == nil)
+        try expect(query["keyterm"] == nil)
     }
 
     try runTest("Nova-3 keyterms are normalized and sent as separate parameters") {
@@ -122,10 +124,31 @@ func runDeepgramAndTranscriptTests() throws {
         try expect(markdown.contains("timestamp_source: \"capture_clock\""))
         try expect(markdown.contains("audio_file: \"Audio.m4a\""))
         try expect(markdown.contains("calendar_match_status: unmatched"))
+        try expect(markdown.contains("calendar_association_source: null"))
         try expect(markdown.contains("[00:00:00.500] **Speaker 3:** Welcome."))
         try expect(markdown.contains("[00:00:02.000] **Taylor Rivera:** I agree."))
         try expect(markdown.contains("Channel 1: Taylor Rivera"))
         try expect(!markdown.contains("_[review]_"))
+
+        recording.calendarEventIdentifier = "event-123"
+        recording.calendarTitle = "Product roadmap review"
+        recording.meetingAssociationState = .automatic
+        let calendarMarkdown = TranscriptMarkdownFormatter.format(
+            document: document,
+            recording: recording
+        )
+        try expect(calendarMarkdown.contains("calendar_match_status: matched"))
+        try expect(calendarMarkdown.contains("calendar_association_source: automatic"))
+        try expect(calendarMarkdown.contains("calendar_event_id: \"event-123\""))
+        try expect(calendarMarkdown.contains("calendar_title: \"Product roadmap review\""))
+
+        recording.markMeetingUnresolved(candidates: [])
+        let unresolvedMarkdown = TranscriptMarkdownFormatter.format(
+            document: document,
+            recording: recording
+        )
+        try expect(unresolvedMarkdown.contains("calendar_match_status: unresolved"))
+        try expect(unresolvedMarkdown.contains("calendar_association_source: null"))
 
         recording.origin = .importedAudio
         recording.timestampSource = .fileCreationDate
@@ -140,6 +163,32 @@ func runDeepgramAndTranscriptTests() throws {
                 "[00:00:02.000] **Channel 1 · Speaker 0:** I agree."
             )
         )
+    }
+
+    try runTest("Markdown uses persisted speaker labels and escapes Markdown punctuation") {
+        var recording = RecordingManifest(
+            language: .english,
+            microphoneUID: "mic",
+            microphoneName: "Mic"
+        )
+        recording.captureStatus = .complete
+        recording.setSpeakerName("Alice * Ops", channel: 0, speaker: 3)
+        let document = TranscriptDocument(
+            segments: [
+                TranscriptSegment(
+                    start: 0,
+                    end: 1,
+                    channel: 0,
+                    speaker: 3,
+                    text: "Hello"
+                )
+            ]
+        )
+        let markdown = TranscriptMarkdownFormatter.format(
+            document: document,
+            recording: recording
+        )
+        try expect(markdown.contains(#"[00:00:00.000] **Alice \* Ops:** Hello"#))
     }
 
     try runTest("paragraphs group utterances across channels and retain review confidence") {

@@ -26,7 +26,10 @@ public final class RecordingJobQueue {
     public var onChange: (@MainActor (RecordingJobActivity?) -> Void)?
 
     public private(set) var activity: RecordingJobActivity? {
-        didSet { onChange?(activity) }
+        didSet {
+            guard activity != oldValue else { return }
+            onChange?(activity)
+        }
     }
 
     private let store: RecordingStore
@@ -36,6 +39,7 @@ public final class RecordingJobQueue {
     private var captureBlocksNewWork = true
     private var runnerTask: Task<Void, Never>?
     private var transcriptionTask: Task<RecordingManifest, Error>?
+    private var workingRecordingID: UUID?
 
     public convenience init(
         store: RecordingStore,
@@ -101,12 +105,13 @@ public final class RecordingJobQueue {
     }
 
     public func isWorking(on recordingID: UUID) -> Bool {
-        activity?.recordingID == recordingID
+        workingRecordingID == recordingID || activity?.recordingID == recordingID
     }
 
     private func run() async {
         var attempted: Set<WorkKey> = []
         defer {
+            workingRecordingID = nil
             runnerTask = nil
             activity = nil
         }
@@ -114,11 +119,13 @@ public final class RecordingJobQueue {
         while !captureBlocksNewWork, !Task.isCancelled {
             let recordings: [RecordingManifest]
             do {
-                recordings = try store.loadAll()
+                recordings = try await loadAll()
             } catch {
                 return
             }
+            guard !captureBlocksNewWork, !Task.isCancelled else { return }
             guard let work = Self.nextWork(in: recordings, excluding: attempted) else { return }
+            workingRecordingID = work.recordingID
             attempted.insert(work.key)
 
             switch work {
@@ -127,18 +134,81 @@ public final class RecordingJobQueue {
             case .transcribe(let recording):
                 await transcribe(recording)
             }
+            workingRecordingID = nil
         }
     }
 
     private func finalize(_ original: RecordingManifest) async {
         activity = .finishingAudio(original.id)
+        defer { activity = nil }
         let interruptionMessage = original.lastFailure?.stage == .finalization
             ? original.lastFailure?.message
             : nil
 
         do {
             let result = try await finalizeOperation(original, store)
-            var recording = try store.load(id: original.id)
+            try await persistFinalization(
+                for: original.id,
+                result: result,
+                interruptionMessage: interruptionMessage
+            )
+        } catch {
+            await persistFinalizationFailure(for: original.id, error: error)
+        }
+    }
+
+    private func transcribe(_ original: RecordingManifest) async {
+        guard !captureBlocksNewWork else { return }
+        let apiKey: String
+        if await expectsRetainedTranscriptResponse(for: original) {
+            apiKey = ""
+        } else {
+            do {
+                guard let resolved = try await resolveAPIKey(), !resolved.isEmpty else {
+                    if try await persistWaitingForCredential(for: original.id) {
+                        notifyDurableStateChange()
+                    }
+                    return
+                }
+                apiKey = resolved
+            } catch {
+                if await persistTranscriptionFailureIfNeeded(for: original.id, error: error) {
+                    notifyDurableStateChange()
+                }
+                return
+            }
+        }
+
+        guard !captureBlocksNewWork else { return }
+        activity = .transcribing(original.id)
+        defer { activity = nil }
+        let task = Task.detached(priority: .utility) { [transcribeOperation, store] in
+            try await transcribeOperation(original, store, apiKey)
+        }
+        transcriptionTask = task
+        let result = await task.result
+        transcriptionTask = nil
+        if case .failure(let error) = result,
+           !Task.isCancelled {
+            _ = await persistTranscriptionFailureIfNeeded(for: original.id, error: error)
+        }
+    }
+
+    private func loadAll() async throws -> [RecordingManifest] {
+        let store = store
+        return try await Task.detached(priority: .utility) {
+            try store.loadAll()
+        }.value
+    }
+
+    private func persistFinalization(
+        for id: UUID,
+        result: RecordingPostProcessingResult,
+        interruptionMessage: String?
+    ) async throws {
+        let store = store
+        try await Task.detached(priority: .utility) {
+            var recording = try store.load(id: id)
             recording.files.exportDirectory = result.publication.directoryURL.path
             recording.files.audio = result.publication.audioURL.path
             recording.files.audioBookmark = try? store.bookmark(for: result.publication.audioURL)
@@ -170,9 +240,13 @@ public final class RecordingJobQueue {
                 )
                 try store.save(recording)
             }
-            onChange?(activity)
-        } catch {
-            guard var recording = try? store.load(id: original.id) else { return }
+        }.value
+    }
+
+    private func persistFinalizationFailure(for id: UUID, error: Error) async {
+        let store = store
+        await Task.detached(priority: .utility) {
+            guard var recording = try? store.load(id: id) else { return }
             recording.captureStatus = .failed
             if recording.lastFailure?.stage == .capture {
                 let warning = "Audio finalization failed: \(error.localizedDescription)"
@@ -186,67 +260,59 @@ public final class RecordingJobQueue {
                 )
             }
             try? store.save(recording)
-            onChange?(activity)
-        }
+        }.value
     }
 
-    private func transcribe(_ original: RecordingManifest) async {
-        guard !captureBlocksNewWork else { return }
-        let apiKey: String
-        if store.expectsRetainedTranscriptResponse(for: original) {
-            apiKey = ""
-        } else {
-            do {
-                guard let resolved = try apiKeyProvider(), !resolved.isEmpty else {
-                    var recording = try store.load(id: original.id)
-                    recording.transcriptionStatus = .waitingForCredential
-                    if recording.lastFailure?.stage == .transcription {
-                        recording.lastFailure = nil
-                    }
-                    try store.save(recording)
-                    onChange?(activity)
-                    return
-                }
-                apiKey = resolved
-            } catch {
-                guard var recording = try? store.load(id: original.id) else { return }
-                recording.transcriptionStatus = .failed
-                recording.lastFailure = RecordingFailure(
-                    stage: .transcription,
-                    message: error.localizedDescription
-                )
-                try? store.save(recording)
-                onChange?(activity)
-                return
+    private func expectsRetainedTranscriptResponse(for recording: RecordingManifest) async -> Bool {
+        let store = store
+        return await Task.detached(priority: .utility) {
+            store.expectsRetainedTranscriptResponse(for: recording)
+        }.value
+    }
+
+    private func resolveAPIKey() async throws -> String? {
+        let apiKeyProvider = apiKeyProvider
+        return try await Task.detached(priority: .utility) {
+            try apiKeyProvider()
+        }.value
+    }
+
+    private func persistWaitingForCredential(for id: UUID) async throws -> Bool {
+        let store = store
+        return try await Task.detached(priority: .utility) {
+            var recording = try store.load(id: id)
+            recording.transcriptionStatus = .waitingForCredential
+            if recording.lastFailure?.stage == .transcription {
+                recording.lastFailure = nil
             }
-        }
-
-        guard !captureBlocksNewWork else { return }
-        activity = .transcribing(original.id)
-        let task = Task.detached(priority: .utility) { [transcribeOperation, store] in
-            try await transcribeOperation(original, store, apiKey)
-        }
-        transcriptionTask = task
-        let result = await task.result
-        transcriptionTask = nil
-        if case .failure(let error) = result,
-           !Task.isCancelled {
-            persistTranscriptionFailureIfNeeded(for: original.id, error: error)
-        }
-        onChange?(activity)
+            try store.save(recording)
+            return true
+        }.value
     }
 
-    private func persistTranscriptionFailureIfNeeded(for id: UUID, error: Error) {
-        guard var recording = try? store.load(id: id),
-              recording.transcriptionStatus == .notStarted ||
-                recording.transcriptionStatus == .transcribing
-        else { return }
-        recording.transcriptionStatus = .failed
-        recording.lastFailure = RecordingFailure(
-            stage: .transcription,
-            message: error.localizedDescription
-        )
-        try? store.save(recording)
+    private func persistTranscriptionFailureIfNeeded(for id: UUID, error: Error) async -> Bool {
+        let store = store
+        return await Task.detached(priority: .utility) {
+            guard var recording = try? store.load(id: id),
+                  recording.transcriptionStatus == .notStarted ||
+                    recording.transcriptionStatus == .transcribing
+            else { return false }
+            recording.transcriptionStatus = .failed
+            recording.lastFailure = RecordingFailure(
+                stage: .transcription,
+                message: error.localizedDescription
+            )
+            do {
+                try store.save(recording)
+                return true
+            } catch {
+                return false
+            }
+        }.value
+    }
+
+    private func notifyDurableStateChange() {
+        onChange?(activity)
     }
 
     private enum Work {
@@ -257,6 +323,12 @@ public final class RecordingJobQueue {
             switch self {
             case .finalize(let recording): .finalize(recording.id)
             case .transcribe(let recording): .transcribe(recording.id)
+            }
+        }
+
+        var recordingID: UUID {
+            switch self {
+            case .finalize(let recording), .transcribe(let recording): recording.id
             }
         }
     }

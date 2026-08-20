@@ -128,35 +128,14 @@ public struct RecordingFinalizer: Sendable {
 
     private func loadMetadata(from directory: URL, source: String) throws -> [CaptureChunk] {
         let metadataURL = directory.appendingPathComponent("chunks.jsonl")
-        guard FileManager.default.fileExists(atPath: metadataURL.path) else {
-            throw RecordingFinalizerError.missingCaptureMetadata(source: source)
-        }
-        let data = try Data(contentsOf: metadataURL)
-        let completeData: Data
-        if data.last == 0x0a {
-            completeData = data
-        } else if let lastNewline = data.lastIndex(of: 0x0a) {
-            completeData = data.prefix(through: lastNewline)
-        } else {
-            completeData = Data()
-        }
-        let lines = completeData.split(separator: 0x0a, omittingEmptySubsequences: true)
-        let decoder = JSONDecoder()
-        let chunks: [CaptureChunk]
         do {
-            chunks = try lines.map { line in
-                try decoder.decode(CaptureChunk.self, from: Data(line))
-            }
-        } catch {
-            throw RecordingFinalizerError.invalidCaptureMetadata(source: source)
-        }
-        guard !chunks.isEmpty else {
+            return try CaptureMetadataReader.read(from: metadataURL)
+                .sorted { $0.firstHostTime < $1.firstHostTime }
+        } catch CaptureMetadataReaderError.missing {
             throw RecordingFinalizerError.missingCaptureMetadata(source: source)
-        }
-        guard chunks.allSatisfy({ $0.isValid }) else {
+        } catch CaptureMetadataReaderError.invalid {
             throw RecordingFinalizerError.invalidCaptureMetadata(source: source)
         }
-        return chunks.sorted { $0.firstHostTime < $1.firstHostTime }
     }
 
     private func align(

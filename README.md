@@ -38,6 +38,7 @@ From the repository root:
 
 ```sh
 ./scripts/test.sh
+./scripts/create-local-signing-identity.sh
 ./scripts/build-app.sh release
 mkdir -p "$HOME/Applications"
 ditto ".build/Call Recorder.app" "$HOME/Applications/Call Recorder.app"
@@ -48,15 +49,30 @@ This installs the app for the current user without `sudo`. To install it for
 all users, copy the built app to `/Applications` instead if your account has
 permission.
 
-The build script creates an ad-hoc signed local bundle at
-`.build/Call Recorder.app` and verifies its signature. Rebuilding the
-executable may cause macOS to request privacy access again.
+The one-time signing setup creates a non-exportable, self-signed development
+identity in the current user's login Keychain. The build script uses that
+identity for local bundles at `.build/Call Recorder.app`, allowing macOS to
+recognize later builds as updates and retain privacy and Keychain approvals.
+The private key never enters the repository. Without the local identity, the
+build script falls back to ad-hoc signing and warns that permissions may be
+requested again.
 
 For development, build and open the app in place:
 
 ```sh
 ./scripts/build-app.sh debug
 ./scripts/launch-app.sh
+```
+
+Debug builds never read or write macOS Keychain. They use `DEEPGRAM_API_KEY`
+from the app process environment when live transcription is needed; without it,
+recording, Calendar, history, playback, and transcript UI can still be tested,
+while uploads wait for a credential. Release builds retain the normal Keychain
+behavior. UI automation can open either debug window directly with:
+
+```sh
+open -n ".build/Call Recorder.app" --args --open-settings
+open -n ".build/Call Recorder.app" --args --open-recordings
 ```
 
 ## First use
@@ -145,9 +161,9 @@ overwriting an existing file and never takes ownership of imported audio.
   and never changes the default input or output device.
 - Capture failures and dropped samples are surfaced instead of hidden.
 
-For local development only, `DEEPGRAM_API_KEY` can override the Keychain value
-in the app environment. Do not store it in the repository or pass it as a
-command-line argument.
+For local development only, provide `DEEPGRAM_API_KEY` in the debug app
+environment when a real Deepgram upload must be tested. Do not store it in the
+repository or pass it as a command-line argument.
 
 ## Hardware verification
 

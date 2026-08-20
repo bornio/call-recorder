@@ -17,8 +17,8 @@ public enum KeychainStoreError: LocalizedError, Sendable {
 }
 
 public struct KeychainStore: Sendable {
-    public static let deepgramService = "io.github.bornio.call-recorder.deepgram"
-    public static let deepgramAccount = "api-key"
+    private static let deepgramService = "io.github.bornio.call-recorder.deepgram"
+    private static let deepgramAccount = "api-key"
 
     public init() {}
 
@@ -80,14 +80,6 @@ public struct KeychainStore: Sendable {
             return override
         }
         return try deepgramAPIKey()
-    }
-
-    public func hasDeepgramAPIKey() -> Bool {
-        do {
-            return try resolvedDeepgramAPIKey()?.isEmpty == false
-        } catch {
-            return false
-        }
     }
 
     public func deleteDeepgramAPIKey() throws {

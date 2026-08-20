@@ -53,7 +53,38 @@ if [[ -n "$build_number" ]]; then
 fi
 
 chmod 755 "$contents/MacOS/CallRecorder"
-codesign --force --sign - --timestamp=none "$app_path"
+local_signing_identity="${CALL_RECORDER_LOCAL_SIGNING_IDENTITY:-Call Recorder Local Code Signing}"
+login_keychain="${CALL_RECORDER_LOCAL_KEYCHAIN:-$HOME/Library/Keychains/login.keychain-db}"
+signing_identity="${CODE_SIGN_IDENTITY:-}"
+signing_identity_label="$signing_identity"
+
+if [[ -z "$signing_identity" && -f "$login_keychain" ]]; then
+  signing_identity="$({
+    security find-identity -v -p codesigning "$login_keychain" 2>/dev/null || true
+  } | awk -v label="\"$local_signing_identity\"" '
+    index($0, label) {
+      if (found) exit 2
+      found = 1
+      print $2
+    }
+  ')" || {
+    print -u2 "Multiple local signing identities named '$local_signing_identity' were found."
+    print -u2 "Remove the duplicate or set CODE_SIGN_IDENTITY explicitly."
+    exit 1
+  }
+  if [[ -n "$signing_identity" ]]; then
+    signing_identity_label="$local_signing_identity"
+  fi
+fi
+
+if [[ -n "$signing_identity" && "$signing_identity" != "-" ]]; then
+  print -u2 "Signing with persistent identity: $signing_identity_label"
+  codesign --force --sign "$signing_identity" "$app_path"
+else
+  print -u2 "warning: persistent local signing identity not found; using ad-hoc signing"
+  print -u2 "run scripts/create-local-signing-identity.sh once to preserve macOS permissions"
+  codesign --force --sign - --timestamp=none "$app_path"
+fi
 codesign --verify --strict --verbose=2 "$app_path"
 
 print "$app_path"

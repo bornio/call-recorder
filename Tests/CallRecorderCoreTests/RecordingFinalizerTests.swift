@@ -3,9 +3,10 @@ import CoreAudio
 import Foundation
 @testable import CallRecorderCore
 
+@MainActor
 func runRecordingFinalizerTests() throws {
     try runTest("finalizer reads valid partial CAF reads through end of file") {
-        try withFinalizerTemporaryDirectory { root in
+        try withTemporaryDirectory(prefix: "CallRecorderFinalizerTests") { root in
             let systemDirectory = root.appendingPathComponent("system", isDirectory: true)
             let microphoneDirectory = root.appendingPathComponent("microphone", isDirectory: true)
             try FileManager.default.createDirectory(at: systemDirectory, withIntermediateDirectories: true)
@@ -46,7 +47,7 @@ func runRecordingFinalizerTests() throws {
     }
 
     try runTest("sources align into remote-left and local-microphone-right WAV channels") {
-        try withFinalizerTemporaryDirectory { root in
+        try withTemporaryDirectory(prefix: "CallRecorderFinalizerTests") { root in
             let systemDirectory = root.appendingPathComponent("system", isDirectory: true)
             let microphoneDirectory = root.appendingPathComponent("microphone", isDirectory: true)
             try FileManager.default.createDirectory(at: systemDirectory, withIntermediateDirectories: true)
@@ -98,7 +99,7 @@ func runRecordingFinalizerTests() throws {
     }
 
     try runTest("a callback discontinuity remains silence in the final timeline") {
-        try withFinalizerTemporaryDirectory { root in
+        try withTemporaryDirectory(prefix: "CallRecorderFinalizerTests") { root in
             let systemDirectory = root.appendingPathComponent("system", isDirectory: true)
             let microphoneDirectory = root.appendingPathComponent("microphone", isDirectory: true)
             try FileManager.default.createDirectory(at: systemDirectory, withIntermediateDirectories: true)
@@ -139,7 +140,7 @@ func runRecordingFinalizerTests() throws {
     }
 
     try runTest("post-processing recovers closed chunks into the planned destination") {
-        try withFinalizerTemporaryDirectory { root in
+        try withTemporaryDirectory(prefix: "CallRecorderFinalizerTests") { root in
             let store = RecordingStore(rootDirectory: root.appendingPathComponent("history"))
             var recording = try store.createRecording(
                 language: .english,
@@ -245,12 +246,4 @@ private func sample(in wav: Data, frame: Int, channel: Int) -> Int16 {
         $0.loadUnaligned(fromByteOffset: offset, as: UInt16.self)
     }
     return Int16(bitPattern: UInt16(littleEndian: value))
-}
-
-private func withFinalizerTemporaryDirectory(_ body: (URL) throws -> Void) throws {
-    let url = FileManager.default.temporaryDirectory
-        .appendingPathComponent("CallRecorderFinalizerTests-\(UUID().uuidString)", isDirectory: true)
-    try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: url) }
-    try body(url)
 }

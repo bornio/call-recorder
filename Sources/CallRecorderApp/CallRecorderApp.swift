@@ -1,5 +1,4 @@
 import AppKit
-import CallRecorderCore
 import SwiftUI
 
 @MainActor
@@ -136,14 +135,18 @@ struct CallRecorderApplication: App {
         Window("Recordings", id: "recordings") {
             HistoryView()
                 .environmentObject(model)
+                .frame(minWidth: 860, minHeight: 580)
         }
-        .defaultSize(width: 720, height: 440)
+        .defaultSize(width: 1_180, height: 760)
+        .commands {
+            RecordingSearchCommands()
+        }
 
         Settings {
             SettingsView()
                 .environmentObject(model)
                 .frame(width: 520)
-                .frame(minHeight: 620)
+                .frame(minHeight: 520, idealHeight: 700)
         }
     }
 }

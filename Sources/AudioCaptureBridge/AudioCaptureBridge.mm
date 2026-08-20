@@ -18,7 +18,6 @@
 #include <filesystem>
 #include <exception>
 #include <fcntl.h>
-#include <limits>
 #include <memory>
 #include <new>
 #include <string>
@@ -92,7 +91,6 @@ public:
     struct Slot {
         uint64_t sequence = 0;
         uint64_t host_time = 0;
-        double sample_time = std::numeric_limits<double>::quiet_NaN();
         uint32_t frames = 0;
         std::array<float, kMaximumFramesPerCallback> samples{};
     };
@@ -241,10 +239,6 @@ public:
                 (timestamp->mFlags & kAudioTimeStampHostTimeValid) != 0
             ? timestamp->mHostTime
             : AudioGetCurrentHostTime();
-        slot->sample_time = timestamp != nullptr &&
-                (timestamp->mFlags & kAudioTimeStampSampleTimeValid) != 0
-            ? timestamp->mSampleTime
-            : std::numeric_limits<double>::quiet_NaN();
         slot->frames = frames;
         level_.store(std::min(peak, 1.0f), std::memory_order_relaxed);
         captured_frames_.fetch_add(frames, std::memory_order_relaxed);
@@ -301,10 +295,6 @@ public:
                 (writer_timestamp->mFlags & kAudioTimeStampHostTimeValid) != 0
             ? writer_timestamp->mHostTime
             : AudioGetCurrentHostTime();
-        slot->sample_time = writer_timestamp != nullptr &&
-                (writer_timestamp->mFlags & kAudioTimeStampSampleTimeValid) != 0
-            ? writer_timestamp->mSampleTime
-            : std::numeric_limits<double>::quiet_NaN();
         slot->frames = frames;
         level_.store(std::min(peak, 1.0f), std::memory_order_relaxed);
         captured_frames_.fetch_add(frames, std::memory_order_relaxed);
@@ -442,7 +432,7 @@ private:
         buffer_list.mBuffers[0].mData = const_cast<float *>(slot.samples.data());
         const OSStatus status = ExtAudioFileWrite(audio_file_, slot.frames, &buffer_list);
         if (status != noErr) {
-            writer_error_.store(status == 0 ? 1 : status, std::memory_order_release);
+            writer_error_.store(status, std::memory_order_release);
             close_chunk();
             return;
         }
@@ -450,7 +440,6 @@ private:
         chunk_frames_ += slot.frames;
         last_sequence_ = slot.sequence;
         last_host_time_ = slot.host_time;
-        last_sample_time_ = slot.sample_time;
         last_frames_ = slot.frames;
     }
 
@@ -501,9 +490,7 @@ private:
         }
 
         first_host_time_ = slot.host_time;
-        first_sample_time_ = slot.sample_time;
         last_host_time_ = slot.host_time;
-        last_sample_time_ = slot.sample_time;
         last_sequence_ = slot.sequence;
         last_frames_ = 0;
         chunk_frames_ = 0;
@@ -584,8 +571,6 @@ private:
     uint64_t chunk_frames_ = 0;
     uint64_t first_host_time_ = 0;
     uint64_t last_host_time_ = 0;
-    double first_sample_time_ = std::numeric_limits<double>::quiet_NaN();
-    double last_sample_time_ = std::numeric_limits<double>::quiet_NaN();
     uint64_t last_sequence_ = 0;
     uint32_t last_frames_ = 0;
 };
@@ -660,11 +645,9 @@ public:
             aggregate_device_id_ = kAudioObjectUnknown;
         }
         if (tap_id_ != kAudioObjectUnknown) {
-            if (@available(macOS 14.2, *)) {
-                const OSStatus status = AudioHardwareDestroyProcessTap(tap_id_);
-                if (status != noErr && error.empty()) {
-                    error = status_description("Destroying the system-audio tap", status);
-                }
+            const OSStatus status = AudioHardwareDestroyProcessTap(tap_id_);
+            if (status != noErr && error.empty()) {
+                error = status_description("Destroying the system-audio tap", status);
             }
             tap_id_ = kAudioObjectUnknown;
         }
@@ -959,11 +942,7 @@ private:
         tap_description.privateTap = YES;
         tap_description.muteBehavior = CATapUnmuted;
 
-        if (@available(macOS 14.2, *)) {
-            status = AudioHardwareCreateProcessTap(tap_description, &tap_id_);
-        } else {
-            status = kAudioHardwareUnsupportedOperationError;
-        }
+        status = AudioHardwareCreateProcessTap(tap_description, &tap_id_);
         if (status != noErr) {
             start_error_code_ = CR_CAPTURE_ERROR_TAP_CREATE;
             error = status_description(

@@ -35,8 +35,12 @@ let package = Package(
         .executableTarget(
             name: "CallRecorderApp",
             dependencies: ["CallRecorderCore"],
+            swiftSettings: [
+                .define("CALL_RECORDER_KEYCHAIN_FREE_DEV", .when(configuration: .debug)),
+            ],
             linkerSettings: [
                 .linkedFramework("AppKit"),
+                .linkedFramework("EventKit"),
                 .linkedFramework("SwiftUI"),
             ]
         ),

@@ -26,6 +26,8 @@
     <true/>
     <key>NSAudioCaptureUsageDescription</key>
     <string>Call Recorder captures system audio only after you explicitly start a recording.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>Call Recorder reads selected calendars locally to associate recordings with nearby meetings. It never changes calendar events.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Call Recorder records your selected microphone as a separate channel after you explicitly start a recording.</string>
     <key>NSPrincipalClass</key>

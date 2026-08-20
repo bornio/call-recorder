@@ -2,159 +2,70 @@ import AppKit
 import CallRecorderCore
 import SwiftUI
 
-struct MenuBarLabelView: View {
-    @EnvironmentObject private var model: AppModel
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Image(systemName: menuBarIcon)
-            if model.isCaptureActive || model.captureState == .stopping {
-                Text(recordingDuration(model.elapsedSeconds))
-                    .monospacedDigit()
-            }
-        }
-        .accessibilityLabel(accessibilityLabel)
-    }
-
-    private var menuBarIcon: String {
-        switch model.captureState {
-        case .starting: "ellipsis.circle"
-        case .recording: "record.circle.fill"
-        case .paused: "pause.circle.fill"
-        case .stopping: "ellipsis.circle"
-        case .ready: readyMenuBarIcon
-        }
-    }
-
-    private var readyMenuBarIcon: String {
-        if model.captureIssue != nil || backgroundNeedsAttention {
-            return "exclamationmark.triangle"
-        }
-        if model.isPreparingToTerminate || model.backgroundActivity != nil {
-            return "ellipsis.circle"
-        }
-        if model.hasUnseenTranscriptCompletion {
-            return "checkmark.circle"
-        }
-        return "waveform"
-    }
-
-    private var accessibilityLabel: String {
-        let elapsed = accessibleDuration(model.elapsedSeconds)
-        return switch model.captureState {
-        case .ready:
-            readyAccessibilityLabel
-        case .starting: "Call Recorder, starting recording"
-        case .recording: "Recording, elapsed \(elapsed)"
-        case .paused: "Recording paused, elapsed \(elapsed)"
-        case .stopping:
-            model.isCancelling
-                ? "Discarding recording, elapsed \(elapsed)"
-                : "Saving recording, elapsed \(elapsed)"
-        }
-    }
-
-    private var readyAccessibilityLabel: String {
-        if model.captureIssue != nil {
-            return "Call Recorder, recording needs attention"
-        }
-        if backgroundNeedsAttention {
-            return "Call Recorder, previous recording needs attention"
-        }
-        if model.isPreparingToTerminate {
-            return "Call Recorder, finishing work before quitting"
-        }
-        if let activity = model.backgroundActivity {
-            return switch activity {
-            case .finishingAudio: "Call Recorder, saving previous recording"
-            case .transcribing: "Call Recorder, transcribing previous recording"
-            }
-        }
-        if model.hasUnseenTranscriptCompletion {
-            return "Call Recorder, transcript ready"
-        }
-        return "Call Recorder, ready"
-    }
-
-    private var backgroundNeedsAttention: Bool {
-        model.hasRecordingNeedingAttention
-    }
-}
-
 struct MenuContentView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openWindow) private var openWindow
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            if model.isPreparingToTerminate {
-                TerminationContent(model: model)
-            } else {
-                ZStack(alignment: .topLeading) {
-                    captureContent
-                        .id(model.captureState)
-                        .transition(captureTransition)
+            MenuHeader(model: model, aboutAction: showAbout)
+
+            Divider()
+
+            AdaptiveMenuScrollView(maximumHeight: 360) {
+                VStack(alignment: .leading, spacing: 14) {
+                    if model.isPreparingToTerminate {
+                        TerminationContent(model: model)
+                    } else {
+                        captureContent
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+
+                    if let issue = model.captureIssue {
+                        CaptureIssueView(model: model, issue: issue)
+                    }
+
+                    if let recording = model.backgroundSummaryRecording {
+                        Divider()
+                        BackgroundRecordingSummary(
+                            recording: recording,
+                            captureIsActive: model.captureState != .ready,
+                            activity: model.backgroundActivity,
+                            action: showRecordings
+                        )
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .animation(captureAnimation, value: model.captureState)
-            }
-
-            if let issue = model.captureIssue {
-                CaptureIssueView(model: model, issue: issue)
-            }
-
-            if let recording = model.backgroundSummaryRecording {
-                Divider()
-                BackgroundRecordingSummary(
-                    recording: recording,
-                    captureIsActive: model.captureState != .ready,
-                    activity: model.backgroundActivity,
-                    action: showRecordings
-                )
             }
 
             Divider()
             VStack(spacing: 8) {
-                HStack(spacing: 8) {
-                    Button { showRecordings() } label: {
-                        Label("Recordings", systemImage: "tray.full")
-                    }
-                    .buttonStyle(.bordered)
-                    SettingsLink {
-                        Label("Settings", systemImage: "gearshape")
-                    }
-                    .buttonStyle(.bordered)
-                    Spacer()
-                    Button {
-                        NSApplication.shared.terminate(nil)
-                    } label: {
-                        Label("Quit", systemImage: "power")
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(model.isPreparingToTerminate)
+                Button(action: showRecordings) {
+                    Label("Recordings", systemImage: "tray.full")
+                        .frame(maxWidth: .infinity)
                 }
+                .buttonStyle(.bordered)
 
-                Button(action: showAbout) {
-                    Text(aboutButtonTitle)
+                if let applicationVersion {
+                    Text("Version \(applicationVersion)")
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
+                        .accessibilityLabel("Call Recorder version \(applicationVersion)")
                 }
-                .buttonStyle(.plain)
-                .disabled(model.isPreparingToTerminate)
-                .help("About Call Recorder")
-                .accessibilityLabel(aboutAccessibilityLabel)
-                .accessibilityHint("Shows app version and build information")
             }
             .controlSize(.small)
             .frame(maxWidth: .infinity)
         }
         .padding(16)
-        .frame(width: 360)
+        .frame(width: 380)
         .onAppear {
             model.setMenuPresented(true)
-            model.refreshMicrophones()
-            model.reloadHistory()
+        }
+        .task {
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            model.refreshMicrophonesAsync()
+            model.refreshCalendarContextIfStale()
         }
         .onDisappear { model.setMenuPresented(false) }
     }
@@ -213,38 +124,6 @@ struct MenuContentView: View {
         return version
     }
 
-    private var applicationBuild: String? {
-        guard let build = Bundle.main.object(
-            forInfoDictionaryKey: "CFBundleVersion"
-        ) as? String,
-              !build.isEmpty
-        else { return nil }
-        return build
-    }
-
-    private var aboutButtonTitle: String {
-        applicationVersion.map { "Call Recorder \($0)" } ?? "About Call Recorder"
-    }
-
-    private var aboutAccessibilityLabel: String {
-        guard let applicationVersion else { return "About Call Recorder" }
-        guard let applicationBuild else {
-            return "About Call Recorder, version \(applicationVersion)"
-        }
-        return "About Call Recorder, version \(applicationVersion), build \(applicationBuild)"
-    }
-
-    private var captureTransition: AnyTransition {
-        if reduceMotion {
-            return .opacity
-        }
-        return .opacity.combined(with: .scale(scale: 0.97, anchor: .top))
-    }
-
-    private var captureAnimation: Animation {
-        .easeOut(duration: reduceMotion ? 0.1 : 0.2)
-    }
-
     private func confirmDiscard() {
         let alert = NSAlert()
         alert.messageText = "Discard this recording?"
@@ -254,6 +133,53 @@ struct MenuContentView: View {
         alert.addButton(withTitle: "Discard Recording").hasDestructiveAction = true
         guard alert.runModal() == .alertSecondButtonReturn else { return }
         model.cancelRecording()
+    }
+}
+
+private struct MenuHeader: View {
+    @ObservedObject var model: AppModel
+    let aboutAction: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "waveform")
+                .font(.title2)
+                .frame(width: 28)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Call Recorder")
+                    .font(.headline)
+                Text(statusText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Menu {
+                SettingsLink { Text("Settings…") }
+                Button("About Call Recorder", action: aboutAction)
+                Divider()
+                Button("Quit Call Recorder") {
+                    NSApplication.shared.terminate(nil)
+                }
+                .disabled(model.isPreparingToTerminate)
+            } label: {
+                Image(systemName: "ellipsis")
+                    .frame(width: 26, height: 26)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .accessibilityLabel("Call Recorder menu")
+        }
+    }
+
+    private var statusText: String {
+        if model.isPreparingToTerminate { return "Finishing before quit" }
+        return switch model.captureState {
+        case .ready: "Ready to record"
+        case .starting: "Starting recording"
+        case .recording: "Recording"
+        case .paused: "Recording paused"
+        case .stopping: model.isCancelling ? "Discarding recording" : "Saving recording"
+        }
     }
 }
 
@@ -315,12 +241,23 @@ private struct ReadyCaptureContent: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Label("Ready to record", systemImage: "waveform")
-                    .font(.headline)
-                Text("Mac audio and your microphone will be saved locally.")
+            if model.calendarSuggestionsEnabled {
+                CalendarContextView(model: model)
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Recording title")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                TextField(
+                    "Optional title",
+                    text: Binding(
+                        get: { model.recordingTitle },
+                        set: { model.setRecordingTitle($0) }
+                    )
+                )
+                .textFieldStyle(.roundedBorder)
+                .accessibilityLabel("Recording title")
             }
 
             LabeledContent("Microphone") {
@@ -343,7 +280,8 @@ private struct ReadyCaptureContent: View {
                     }
                 }
                 .labelsHidden()
-                .pickerStyle(.menu)
+                .pickerStyle(.segmented)
+                .frame(width: 220)
             }
 
             if !model.hasDeepgramKey,
@@ -381,9 +319,143 @@ private struct ReadyCaptureContent: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-            .keyboardShortcut(.defaultAction)
             .disabled(!model.canStartRecording)
+
+            Text("Click Start to begin recording.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .center)
         }
+    }
+}
+
+private struct CalendarContextView: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        Group {
+            if !model.calendarCandidates.isEmpty || model.calendarChoiceWasMade {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label(contextLabel, systemImage: contextSystemImage)
+                        .font(.caption)
+                        .foregroundStyle(model.calendarSelectionNeedsReview ? .orange : .secondary)
+
+                    Menu {
+                        ForEach(model.calendarCandidates) { event in
+                            Button(meetingChoiceTitle(event)) {
+                                model.selectCalendarSuggestion(event)
+                            }
+                        }
+                        Divider()
+                        Button("No calendar meeting") {
+                            model.selectCalendarSuggestion(nil)
+                        }
+                    } label: {
+                        HStack {
+                            Text(selectionTitle)
+                                .font(.headline)
+                                .lineLimit(1)
+                            Spacer()
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel("Meeting")
+                    .accessibilityValue(selectionTitle)
+
+                    if let suggestion = model.calendarSuggestion {
+                        Text(meetingTime(for: suggestion))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if !suggestion.attendeeNames.isEmpty {
+                            Text(suggestion.attendeeNames.prefix(4).joined(separator: ", "))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    } else if model.calendarSelectionNeedsReview {
+                        Text("The app can decide after Stop, or you can choose now.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("Meeting title, time, and attendee names are saved locally with the recording.")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+            } else if model.isRefreshingCalendar {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Checking Calendar…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else if model.calendarAccessState == .fullAccess {
+                Label("No meeting near this recording", systemImage: "calendar")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                SettingsLink {
+                    Label("Calendar suggestions need access", systemImage: "calendar.badge.exclamationmark")
+                }
+                .font(.caption)
+            }
+        }
+    }
+
+    private var selectionTitle: String {
+        if let suggestion = model.calendarSuggestion { return suggestion.title }
+        if model.calendarSelectionNeedsReview { return "Choose meeting…" }
+        return "No calendar meeting"
+    }
+
+    private var contextLabel: String {
+        if model.calendarSelectionNeedsReview { return "Meeting needs a choice" }
+        if model.calendarChoiceWasMade, model.calendarSuggestion == nil {
+            return "Calendar association"
+        }
+        if let suggestion = model.calendarSuggestion {
+            return meetingLabel(for: suggestion)
+        }
+        return "Calendar association"
+    }
+
+    private var contextSystemImage: String {
+        model.calendarSelectionNeedsReview
+            ? "calendar.badge.exclamationmark"
+            : "calendar"
+    }
+
+    private func meetingLabel(for suggestion: CalendarEventCandidate) -> String {
+        let now = Date()
+        if suggestion.endDate <= now { return "Previous meeting" }
+        return suggestion.startDate <= now ? "Current meeting" : "Next meeting"
+    }
+
+    private func meetingTime(for suggestion: CalendarEventCandidate) -> String {
+        let formatter = DateIntervalFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter.string(from: suggestion.startDate, to: suggestion.endDate)
+    }
+
+    private func shortMeetingTitle(_ title: String) -> String {
+        guard title.count > 30 else { return title }
+        return String(title.prefix(27)) + "..."
+    }
+
+    private func meetingChoiceTitle(_ event: CalendarEventCandidate) -> String {
+        [
+            shortMeetingTitle(event.title),
+            meetingTime(for: event),
+            event.calendarName,
+        ].compactMap { $0 }.joined(separator: " · ")
     }
 }
 
@@ -525,167 +597,4 @@ private struct CaptureLevelRow: View {
     private var clampedValue: Double {
         Double(max(0, min(value, 1)))
     }
-}
-
-private struct BackgroundRecordingSummary: View {
-    let recording: RecordingManifest
-    let captureIsActive: Bool
-    let activity: RecordingJobActivity?
-    let action: () -> Void
-
-    var body: some View {
-        Group {
-            if recording.transcriptionStatus == .waitingForCredential {
-                SettingsLink {
-                    summaryLabel
-                }
-                .accessibilityHint("Opens Settings to add a Deepgram key")
-            } else {
-                Button(action: action) {
-                    summaryLabel
-                }
-                .accessibilityHint("Opens Recordings")
-            }
-        }
-        .buttonStyle(.bordered)
-        .buttonBorderShape(.roundedRectangle)
-        .accessibilityLabel("\(title). \(detail)")
-    }
-
-    private var summaryLabel: some View {
-        HStack(alignment: .center, spacing: 10) {
-            statusIcon
-                .frame(width: 16)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(captureIsActive ? "Previous recording" : "Recording")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(title)
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-            Spacer(minLength: 8)
-            Image(systemName: recording.transcriptionStatus == .waitingForCredential
-                ? "gearshape"
-                : "chevron.right")
-                .foregroundStyle(.tertiary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
-    }
-
-    @ViewBuilder
-    private var statusIcon: some View {
-        if recording.transcriptionStatus == .waitingForCredential {
-            Image(systemName: "key.fill")
-                .foregroundStyle(.orange)
-        } else if recording.lastFailure != nil ||
-                    recording.captureStatus == .failed ||
-                    recording.transcriptionStatus == .failed {
-            Image(systemName: "exclamationmark.circle.fill")
-                .foregroundStyle(.red)
-        } else if activeActivity != nil ||
-                    recording.captureStatus == .processing ||
-                    recording.transcriptionStatus == .transcribing {
-            ProgressView()
-                .controlSize(.small)
-        } else if recording.captureHealthSummary != nil {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-        } else if recording.transcriptionStatus == .complete {
-            Image(systemName: "checkmark.circle")
-                .foregroundStyle(.green)
-        } else {
-            Image(systemName: "clock")
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private var title: String {
-        if recording.transcriptionStatus == .waitingForCredential {
-            return "Deepgram key needed"
-        }
-        if recording.lastFailure != nil ||
-            recording.captureStatus == .failed ||
-            recording.transcriptionStatus == .failed {
-            return "Recording needs attention"
-        }
-        if case .finishingAudio = activeActivity {
-            return "Audio secured locally"
-        }
-        if case .transcribing = activeActivity {
-            return "Saved locally · Transcribing…"
-        }
-        if recording.captureStatus == .processing {
-            return "Audio secured locally"
-        }
-        if recording.transcriptionStatus == .transcribing {
-            return "Saved locally · Transcribing…"
-        }
-        if recording.captureStatus == .complete,
-           recording.transcriptionStatus == .notStarted {
-            return "Saved locally · Waiting to transcribe"
-        }
-        return "Transcript ready"
-    }
-
-    private var detail: String {
-        if recording.transcriptionStatus == .waitingForCredential {
-            if let captureHealthSummary = recording.captureHealthSummary {
-                return "\(captureHealthSummary) Add a key to transcribe."
-            }
-            return "Add a key to start transcription."
-        }
-        if recording.lastFailure != nil ||
-            recording.captureStatus == .failed ||
-            recording.transcriptionStatus == .failed {
-            return "Open Recordings for details."
-        }
-        if let captureHealthSummary = recording.captureHealthSummary {
-            return captureHealthSummary
-        }
-        if case .finishingAudio = activeActivity {
-            return "Finishing the audio file. You can record again."
-        }
-        if case .transcribing = activeActivity {
-            return "You can start another recording."
-        }
-        if recording.captureStatus == .processing {
-            return "Finishing the audio file. You can record again."
-        }
-        if recording.transcriptionStatus == .transcribing {
-            return "You can start another recording."
-        }
-        if captureIsActive && recording.transcriptionStatus == .notStarted {
-            return "Transcription starts when this recording ends."
-        }
-        return recording.displayTitle
-    }
-
-    private var activeActivity: RecordingJobActivity? {
-        guard activity?.recordingID == recording.id else { return nil }
-        return activity
-    }
-}
-
-private func recordingDuration(_ interval: TimeInterval) -> String {
-    let seconds = max(0, Int(interval))
-    if seconds >= 3_600 {
-        return String(format: "%02d:%02d:%02d", seconds / 3_600, (seconds / 60) % 60, seconds % 60)
-    }
-    return String(format: "%02d:%02d", seconds / 60, seconds % 60)
-}
-
-func accessibleDuration(_ interval: TimeInterval) -> String {
-    let seconds = max(0, Int(interval))
-    let hours = seconds / 3_600
-    let minutes = (seconds / 60) % 60
-    let remainder = seconds % 60
-    return [
-        hours > 0 ? "\(hours) hours" : nil,
-        minutes > 0 ? "\(minutes) minutes" : nil,
-        "\(remainder) seconds",
-    ].compactMap { $0 }.joined(separator: ", ")
 }

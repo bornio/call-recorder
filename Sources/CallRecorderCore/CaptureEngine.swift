@@ -114,21 +114,9 @@ public final class CaptureEngine: @unchecked Sendable {
         guard cr_capture_copy_statistics(handle, &bridgeStatistics) == CR_CAPTURE_OK else {
             return .empty
         }
-        let fatalCode = bridgeStatistics.fatal_error_code
-        let statistics = CaptureLiveStatistics(
-            isRunning: bridgeStatistics.running,
-            systemLevel: bridgeStatistics.system_level,
-            microphoneLevel: bridgeStatistics.microphone_level,
-            summary: CaptureSummary(
-                systemFrames: bridgeStatistics.system_frames,
-                microphoneFrames: bridgeStatistics.microphone_frames,
-                systemDroppedFrames: bridgeStatistics.system_dropped_frames,
-                microphoneDroppedFrames: bridgeStatistics.microphone_dropped_frames,
-                systemSampleRate: bridgeStatistics.system_sample_rate,
-                microphoneSampleRate: bridgeStatistics.microphone_sample_rate
-            ),
-            fatalErrorCode: fatalCode,
-            fatalErrorName: fatalCode == CR_CAPTURE_OK ? nil : Self.errorName(fatalCode)
+        let statistics = Self.makeStatistics(
+            from: bridgeStatistics,
+            isRunning: bridgeStatistics.running
         )
         lastStatistics = statistics
         return statistics
@@ -158,23 +146,7 @@ public final class CaptureEngine: @unchecked Sendable {
         cr_capture_destroy(handle)
         self.handle = nil
 
-        let statistics = CaptureLiveStatistics(
-            isRunning: false,
-            systemLevel: bridgeStatistics.system_level,
-            microphoneLevel: bridgeStatistics.microphone_level,
-            summary: CaptureSummary(
-                systemFrames: bridgeStatistics.system_frames,
-                microphoneFrames: bridgeStatistics.microphone_frames,
-                systemDroppedFrames: bridgeStatistics.system_dropped_frames,
-                microphoneDroppedFrames: bridgeStatistics.microphone_dropped_frames,
-                systemSampleRate: bridgeStatistics.system_sample_rate,
-                microphoneSampleRate: bridgeStatistics.microphone_sample_rate
-            ),
-            fatalErrorCode: bridgeStatistics.fatal_error_code,
-            fatalErrorName: bridgeStatistics.fatal_error_code == CR_CAPTURE_OK
-                ? nil
-                : Self.errorName(bridgeStatistics.fatal_error_code)
-        )
+        let statistics = Self.makeStatistics(from: bridgeStatistics, isRunning: false)
         lastStatistics = statistics
         if result != CR_CAPTURE_OK {
             let message = errorBuffer.withUnsafeBufferPointer { buffer in
@@ -186,6 +158,28 @@ public final class CaptureEngine: @unchecked Sendable {
             )
         }
         return statistics
+    }
+
+    private static func makeStatistics(
+        from bridgeStatistics: CRCaptureStatistics,
+        isRunning: Bool
+    ) -> CaptureLiveStatistics {
+        let fatalCode = bridgeStatistics.fatal_error_code
+        return CaptureLiveStatistics(
+            isRunning: isRunning,
+            systemLevel: bridgeStatistics.system_level,
+            microphoneLevel: bridgeStatistics.microphone_level,
+            summary: CaptureSummary(
+                systemFrames: bridgeStatistics.system_frames,
+                microphoneFrames: bridgeStatistics.microphone_frames,
+                systemDroppedFrames: bridgeStatistics.system_dropped_frames,
+                microphoneDroppedFrames: bridgeStatistics.microphone_dropped_frames,
+                systemSampleRate: bridgeStatistics.system_sample_rate,
+                microphoneSampleRate: bridgeStatistics.microphone_sample_rate
+            ),
+            fatalErrorCode: fatalCode,
+            fatalErrorName: fatalCode == CR_CAPTURE_OK ? nil : Self.errorName(fatalCode)
+        )
     }
 
     public static func defaultAudioRoutes() throws -> AudioRouteSnapshot {

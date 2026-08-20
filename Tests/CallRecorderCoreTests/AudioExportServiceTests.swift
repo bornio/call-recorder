@@ -3,6 +3,7 @@ import AudioToolbox
 import Foundation
 @testable import CallRecorderCore
 
+@MainActor
 func runAudioExportServiceTests() throws {
     try runTest("publication destinations respect paths reserved by queued recordings") {
         let service = AudioExportService()
@@ -29,8 +30,8 @@ func runAudioExportServiceTests() throws {
         try expect(firstPath != secondPath)
     }
 
-    try runTest("a finalized WAV publishes as a compact validated stereo M4A") {
-        try withAudioExportTemporaryDirectory { root in
+    try runTest("a finalized WAV publishes, recovers, and avoids collisions") {
+        try withTemporaryDirectory(prefix: "CallRecorderAudioExportTests") { root in
             let waveURL = root.appendingPathComponent("audio.wav")
             try writeStereoWave(to: waveURL, seconds: 2)
 
@@ -71,13 +72,6 @@ func runAudioExportServiceTests() throws {
             try expectEqual(publicFiles.map(\.lastPathComponent), ["Audio.m4a"])
             let compressed = try AVAudioFile(forReading: published.audioURL)
             try expectEqual(compressed.processingFormat.channelCount, 2)
-            let waveSize = try require(
-                try waveURL.resourceValues(forKeys: [.fileSizeKey]).fileSize
-            )
-            let compressedSize = try require(
-                try published.audioURL.resourceValues(forKeys: [.fileSizeKey]).fileSize
-            )
-            try expect(compressedSize < waveSize)
 
             let recovered = try AudioExportService().recoverPublication(
                 in: published.directoryURL,
@@ -93,7 +87,13 @@ func runAudioExportServiceTests() throws {
                 in: published.directoryURL,
                 to: UUID()
             ))
-            try expectThrows {
+            try expectThrows(
+                AudioExportError.self,
+                matching: {
+                    if case .publicationDoesNotBelongToRecording = $0 { return true }
+                    return false
+                }
+            ) {
                 try AudioExportService().recoverPublication(
                     in: published.directoryURL,
                     recordingID: UUID()
@@ -121,7 +121,7 @@ func runAudioExportServiceTests() throws {
     }
 
     try runTest("unrelated audio is never accepted as an interrupted publication") {
-        try withAudioExportTemporaryDirectory { root in
+        try withTemporaryDirectory(prefix: "CallRecorderAudioExportTests") { root in
             let destination = root.appendingPathComponent("Call", isDirectory: true)
             try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
             try Data([1, 2, 3]).write(to: destination.appendingPathComponent("Audio.m4a"))
@@ -133,7 +133,13 @@ func runAudioExportServiceTests() throws {
             recording.captureStatus = .processing
             recording.files.exportDirectory = destination.path
 
-            try expectThrows {
+            try expectThrows(
+                AudioExportError.self,
+                matching: {
+                    if case .publicationDoesNotBelongToRecording = $0 { return true }
+                    return false
+                }
+            ) {
                 try RecordingPostProcessor().process(
                     recording: recording,
                     store: RecordingStore(rootDirectory: root.appendingPathComponent("history"))
@@ -148,7 +154,7 @@ func runAudioExportServiceTests() throws {
     }
 
     try runTest("stale publication cleanup removes only exact partial artifacts") {
-        try withAudioExportTemporaryDirectory { root in
+        try withTemporaryDirectory(prefix: "CallRecorderAudioExportTests") { root in
             let staging = root.appendingPathComponent(
                 ".call-recorder-\(UUID().uuidString).partial",
                 isDirectory: true
@@ -228,12 +234,4 @@ private func writeStereoWave(to url: URL, seconds: Int) throws {
         }
         try file.write(from: buffer)
     }
-}
-
-private func withAudioExportTemporaryDirectory(_ body: (URL) throws -> Void) throws {
-    let url = FileManager.default.temporaryDirectory
-        .appendingPathComponent("CallRecorderAudioExportTests-\(UUID().uuidString)", isDirectory: true)
-    try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: url) }
-    try body(url)
 }

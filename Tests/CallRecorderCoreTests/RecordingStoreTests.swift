@@ -1,6 +1,7 @@
 import Foundation
 @testable import CallRecorderCore
 
+@MainActor
 func runRecordingStoreTests() throws {
     try runTest("manifest round-trips and history sorts newest first") {
         try withTemporaryDirectory { root in
@@ -23,6 +24,21 @@ func runRecordingStoreTests() throws {
             )
             newer.captureStatus = .complete
             newer.captureStartedAt = Date(timeIntervalSince1970: 200.125)
+            newer.title = "Weekly leadership sync"
+            newer.titleSource = .user
+            newer.assignMeeting(
+                CalendarEventCandidate(
+                    identifier: "event-1",
+                    title: "Leadership",
+                    startDate: Date(timeIntervalSince1970: 200),
+                    endDate: Date(timeIntervalSince1970: 260),
+                    attendeeNames: ["Taylor", "Morgan"],
+                    calendarName: "Work"
+                ),
+                state: .manual,
+                updateCalendarTitle: true
+            )
+            newer.setSpeakerName("Morgan", channel: 0, speaker: 2)
             newer.files.audio = "audio.wav"
             try store.save(newer)
 
@@ -31,6 +47,17 @@ func runRecordingStoreTests() throws {
             try expectEqual(loaded.first?.files.audio, "audio.wav")
             try expectEqual(loaded.first?.effectiveLocalSpeakerName, "Taylor")
             try expectEqual(loaded.first?.effectiveKeyterms, ["YeshID", "Decision Trace"])
+            try expectEqual(loaded.first?.displayTitle, "Weekly leadership sync")
+            try expectEqual(loaded.first?.calendarEventIdentifier, "event-1")
+            try expectEqual(loaded.first?.calendarAttendeeNames, ["Taylor", "Morgan"])
+            try expectEqual(loaded.first?.effectiveMeetingAssociationState, .manual)
+            try expectEqual(loaded.first?.effectiveTitleSource, .user)
+            try expectEqual(loaded.first?.calendarCandidates?.map(\.identifier), ["event-1"])
+            try expectEqual(loaded.first?.calendarCandidates?.first?.calendarName, "Work")
+            try expectEqual(
+                loaded.first?.speakerDisplayName(channel: 0, speaker: 2),
+                "Morgan"
+            )
             try expectEqual(loaded.last?.effectiveLocalSpeakerName, "Me")
             let loadedStart = try require(loaded.first?.captureStartedAt)
             try expect(abs(loadedStart.timeIntervalSince1970 - 200.125) < 0.001)
@@ -58,6 +85,29 @@ func runRecordingStoreTests() throws {
             try expectEqual(recovered.first?.captureStatus, .processing)
             try expectEqual(recovered.first?.lastFailure?.stage, .finalization)
             try expect(FileManager.default.fileExists(atPath: chunk.path))
+        }
+    }
+
+    try runTest("recovery follows capture directories persisted in the manifest") {
+        try withTemporaryDirectory { root in
+            let store = RecordingStore(rootDirectory: root)
+            var recording = try store.createRecording(
+                language: .english,
+                microphoneUID: "mic",
+                microphoneName: "Mic"
+            )
+            recording.captureStartedAt = Date(timeIntervalSince1970: 100)
+            recording.files.systemCaptureDirectory = "capture/remote-custom"
+            recording.files.microphoneCaptureDirectory = "capture/local-custom"
+            try store.save(recording)
+            try writeClosedCaptureMetadata(for: recording, store: store)
+
+            try expect(store.hasClosedCaptureMetadata(for: recording))
+            let recovered = try store.recoverInterruptedRecordings(
+                now: Date(timeIntervalSince1970: 500)
+            )
+            try expectEqual(recovered.first?.captureStatus, .processing)
+            try expectEqual(recovered.first?.id, recording.id)
         }
     }
 
@@ -198,14 +248,28 @@ func runRecordingStoreTests() throws {
                 microphoneUID: "mic",
                 microphoneName: "Mic"
             )
-            try expectThrows { try store.url(for: "../outside", in: recording) }
+            try expectThrows(
+                RecordingStoreError.self,
+                matching: {
+                    if case .invalidRelativePath = $0 { return true }
+                    return false
+                }
+            ) {
+                try store.url(for: "../outside", in: recording)
+            }
 
             let outside = root.appendingPathComponent("outside", isDirectory: true)
             try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
             let link = try store.directory(for: recording)
                 .appendingPathComponent("capture/system/link")
             try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
-            try expectThrows {
+            try expectThrows(
+                RecordingStoreError.self,
+                matching: {
+                    if case .invalidRelativePath = $0 { return true }
+                    return false
+                }
+            ) {
                 try store.url(for: "capture/system/link/file.wav", in: recording)
             }
         }
@@ -440,7 +504,7 @@ func runRecordingStoreTests() throws {
             )
             recording.origin = .importedAudio
             recording.captureStatus = .complete
-            recording.files.audio = "/Volumes/CallRecorderMissingVolume/meeting.m4a"
+            recording.files.audio = "/Volumes/CallRecorderMissingVolume-\(UUID().uuidString)/meeting.m4a"
             try store.save(recording)
 
             let reconciled = try store.reconcileExternalFiles()
@@ -574,11 +638,63 @@ func runRecordingStoreTests() throws {
             try store.removeCaptureArtifacts(for: recording)
 
             try expect(!FileManager.default.fileExists(atPath: waveURL.path))
-            try expectThrows {
+            try expectThrows(CocoaError.self) {
                 try store.url(for: "capture/system/new.caf", in: recording)
                     .checkResourceIsReachable()
             }
             try expectEqual(try store.loadAll().first?.id, recording.id)
+        }
+    }
+
+    try runTest("transcript fingerprints change only when retained response changes") {
+        try withTemporaryDirectory { root in
+            let store = RecordingStore(rootDirectory: root)
+            let recording = try store.createRecording(
+                language: .english,
+                microphoneUID: "mic",
+                microphoneName: "Mic"
+            )
+            try expectEqual(try store.retainedTranscriptFingerprint(for: recording), nil)
+
+            let transcriptURL = try store.directory(for: recording)
+                .appendingPathComponent("transcript.json")
+            let first = Data(
+                "{\"results\":{\"channels\":[{\"alternatives\":[{\"transcript\":\"Hi\",\"words\":[]}]}]}}".utf8
+            )
+            try first.write(to: transcriptURL)
+            let firstDate = Date(timeIntervalSince1970: 100)
+            try FileManager.default.setAttributes(
+                [.modificationDate: firstDate],
+                ofItemAtPath: transcriptURL.path
+            )
+
+            let firstFingerprint = try require(
+                try store.retainedTranscriptFingerprint(for: recording)
+            )
+            try expectEqual(firstFingerprint.byteCount, Int64(first.count))
+            try expect(
+                abs(firstFingerprint.modificationDate.timeIntervalSince(firstDate)) < 0.001
+            )
+            try expectEqual(
+                try store.retainedTranscriptFingerprint(for: recording),
+                firstFingerprint
+            )
+
+            let second = Data(
+                "{\"results\":{\"channels\":[{\"alternatives\":[{\"transcript\":\"Hello\",\"words\":[]}]}]}}".utf8
+            )
+            try second.write(to: transcriptURL)
+            let secondDate = Date(timeIntervalSince1970: 200)
+            try FileManager.default.setAttributes(
+                [.modificationDate: secondDate],
+                ofItemAtPath: transcriptURL.path
+            )
+
+            let secondFingerprint = try require(
+                try store.retainedTranscriptFingerprint(for: recording)
+            )
+            try expect(secondFingerprint != firstFingerprint)
+            try expectEqual(secondFingerprint.byteCount, Int64(second.count))
         }
     }
 }
@@ -590,26 +706,20 @@ private func writeClosedCaptureMetadata(
     let metadata = Data(
         "{\"file\":\"closed.caf\",\"firstHostTime\":1,\"lastHostTime\":1,\"lastFrames\":1,\"frames\":1,\"sampleRate\":48000}\n".utf8
     )
-    for relativePath in [
-        "capture/system/chunks.jsonl",
-        "capture/microphone/chunks.jsonl",
+    for captureDirectory in [
+        recording.files.systemCaptureDirectory,
+        recording.files.microphoneCaptureDirectory,
     ] {
-        try metadata.write(to: try store.url(for: relativePath, in: recording))
+        try FileManager.default.createDirectory(
+            at: try store.url(for: captureDirectory, in: recording),
+            withIntermediateDirectories: true
+        )
+        try metadata.write(
+            to: try store.url(for: "\(captureDirectory)/chunks.jsonl", in: recording)
+        )
+        let chunkURL = try store.url(for: "\(captureDirectory)/closed.caf", in: recording)
+        if !FileManager.default.fileExists(atPath: chunkURL.path) {
+            try Data([1]).write(to: chunkURL)
+        }
     }
-    for relativePath in [
-        "capture/system/closed.caf",
-        "capture/microphone/closed.caf",
-    ] where !FileManager.default.fileExists(
-        atPath: try store.url(for: relativePath, in: recording).path
-    ) {
-        try Data([1]).write(to: try store.url(for: relativePath, in: recording))
-    }
-}
-
-private func withTemporaryDirectory(_ body: (URL) throws -> Void) throws {
-    let url = FileManager.default.temporaryDirectory
-        .appendingPathComponent("CallRecorderTests-\(UUID().uuidString)", isDirectory: true)
-    try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: url) }
-    try body(url)
 }

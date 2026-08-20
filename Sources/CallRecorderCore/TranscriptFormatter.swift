@@ -32,10 +32,7 @@ public struct TranscriptDocument: Equatable, Sendable {
     public var segments: [TranscriptSegment]
 
     public init(segments: [TranscriptSegment]) {
-        self.segments = segments.sorted {
-            if $0.start == $1.start { return $0.channel < $1.channel }
-            return $0.start < $1.start
-        }
+        self.segments = Self.sorted(segments)
     }
 
     public init(deepgramResponse data: Data) throws {
@@ -222,6 +219,17 @@ public enum TranscriptMarkdownFormatter {
         let audioFilename = recording.files.audio.map {
             URL(fileURLWithPath: $0).lastPathComponent
         } ?? ""
+        let meetingState = recording.effectiveMeetingAssociationState
+        let calendarMatchStatus = switch meetingState {
+        case .automatic, .manual: "matched"
+        case .unresolved: "unresolved"
+        case .none: "unmatched"
+        }
+        let calendarAssociationSource = switch meetingState {
+        case .automatic: "automatic"
+        case .manual: "manual"
+        case .unresolved, .none: "null"
+        }
         var lines = [
             "---",
             "recording_id: \(yaml(recording.id.uuidString))",
@@ -233,9 +241,10 @@ public enum TranscriptMarkdownFormatter {
             "origin: \(yaml(recording.effectiveOrigin.rawValue))",
             "timestamp_source: \(yaml(recording.effectiveTimestampSource.rawValue))",
             "audio_file: \(yaml(audioFilename))",
-            "calendar_match_status: unmatched",
-            "calendar_event_id: null",
-            "calendar_title: null",
+            "calendar_match_status: \(calendarMatchStatus)",
+            "calendar_association_source: \(calendarAssociationSource)",
+            "calendar_event_id: \(recording.calendarEventIdentifier.map(yaml) ?? "null")",
+            "calendar_title: \(recording.calendarTitle.map(yaml) ?? "null")",
             "---",
             "",
             "# Call transcript",
@@ -301,13 +310,12 @@ public enum TranscriptMarkdownFormatter {
         for segment: TranscriptSegment,
         recording: RecordingManifest
     ) -> String {
-        if recording.effectiveOrigin == .nativeRecording, segment.channel == 1 {
-            return markdownInline(recording.effectiveLocalSpeakerName)
-        }
-        if recording.effectiveOrigin == .importedAudio, segment.channel > 0 {
-            return "Channel \(segment.channel) · Speaker \(segment.speaker ?? 0)"
-        }
-        return "Speaker \(segment.speaker ?? 0)"
+        markdownInline(
+            recording.speakerDisplayName(
+                channel: segment.channel,
+                speaker: segment.speaker
+            )
+        )
     }
 
     private static func needsReview(

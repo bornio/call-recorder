@@ -1,6 +1,7 @@
 @preconcurrency import CoreAudio
 @testable import CallRecorderCore
 
+@MainActor
 func runAudioDeviceSelectionTests() throws {
     let defaultMicrophone = AudioInputDevice(
         id: 1,
