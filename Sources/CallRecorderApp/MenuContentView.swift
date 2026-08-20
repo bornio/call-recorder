@@ -401,8 +401,32 @@ private struct CalendarContextView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                SettingsLink {
-                    Label("Calendar suggestions need access", systemImage: "calendar.badge.exclamationmark")
+                Group {
+                    switch model.calendarAccessState {
+                    case .notDetermined:
+                        Button {
+                            model.refreshCalendarContext(requestAccess: true)
+                        } label: {
+                            Label("Connect Calendar…", systemImage: "calendar.badge.plus")
+                        }
+                    case .denied, .restricted, .writeOnly:
+                        Button {
+                            model.openCalendarPrivacySettings()
+                        } label: {
+                            Label(
+                                "Calendar Privacy Settings…",
+                                systemImage: "calendar.badge.exclamationmark"
+                            )
+                        }
+                    case .unavailable:
+                        Label(
+                            "Calendar access is unavailable",
+                            systemImage: "calendar.badge.exclamationmark"
+                        )
+                        .foregroundStyle(.secondary)
+                    case .fullAccess:
+                        EmptyView()
+                    }
                 }
                 .font(.caption)
             }
