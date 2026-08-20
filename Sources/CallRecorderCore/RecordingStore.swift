@@ -30,6 +30,13 @@ public struct RecordingStorageUsage: Equatable, Sendable {
     public static let zero = RecordingStorageUsage()
 }
 
+public enum TranscriptMetadataSyncResult: Equatable, Sendable {
+    case noFile
+    case notOwned
+    case unchanged
+    case updated
+}
+
 public struct TranscriptFileFingerprint: Equatable, Hashable, Sendable {
     public var byteCount: Int64
     public var modificationDate: Date
@@ -237,7 +244,8 @@ public struct RecordingStore: Sendable {
                 let privateJSON = try directory(for: recording)
                     .appendingPathComponent("transcript.json")
                 if recording.transcriptionStatus != .complete,
-                   fileManager.fileExists(atPath: privateJSON.path) {
+                   fileManager.fileExists(atPath: privateJSON.path),
+                   transcriptIsComplete(resolvedTranscript, recording: recording) {
                     recording.files.transcriptJSON = "transcript.json"
                     recording.transcriptionStatus = .complete
                     if recording.lastFailure?.stage == .transcription {
@@ -343,6 +351,7 @@ public struct RecordingStore: Sendable {
                     )
                 }
                 try save(recording)
+                _ = try? synchronizeTranscriptMetadata(for: recording)
                 recordings[index] = recording
             }
         }
@@ -493,6 +502,21 @@ public struct RecordingStore: Sendable {
             bookmark: manifest.files.transcriptBookmark,
             in: manifest
         )
+    }
+
+    @discardableResult
+    public func synchronizeTranscriptMetadata(
+        for manifest: RecordingManifest
+    ) throws -> TranscriptMetadataSyncResult {
+        guard let url = try transcriptURL(for: manifest) else { return .noFile }
+        let existing = try String(contentsOf: url, encoding: .utf8)
+        guard let updated = TranscriptMarkdownFormatter.updatingMetadata(
+            in: existing,
+            recording: manifest
+        ) else { return .notOwned }
+        guard updated != existing else { return .unchanged }
+        try AtomicFilePublisher.replaceFile(Data(updated.utf8), at: url)
+        return .updated
     }
 
     public func bookmark(for url: URL) throws -> Data {
@@ -694,6 +718,19 @@ public struct RecordingStore: Sendable {
             TranscriptMarkdownFormatter.format(document: document, recording: recording).utf8
         )
         return existing == expected
+    }
+
+    private func transcriptIsComplete(
+        _ transcriptURL: URL,
+        recording: RecordingManifest
+    ) -> Bool {
+        guard let markdown = try? String(contentsOf: transcriptURL, encoding: .utf8) else {
+            return false
+        }
+        return TranscriptMarkdownFormatter.isCompletedTranscript(
+            markdown,
+            recordingID: recording.id
+        ) || transcriptMatchesRetainedResponse(transcriptURL, recording: recording)
     }
 
     private func hasRecoverableCapture(in directory: URL) -> Bool {

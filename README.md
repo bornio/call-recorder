@@ -104,7 +104,7 @@ rejected so capture data does not leave the Mac during a call.
 
 ## Output and recovery
 
-Each completed call creates one folder:
+Each finalized native call creates one folder immediately:
 
 ```text
 2026-07-10 14-30 — Call/
@@ -114,15 +114,20 @@ Each completed call creates one folder:
 
 `Audio.m4a` is stereo AAC: channel 0 is system audio and channel 1 is the
 selected microphone, labeled with the name configured in Settings. The
-Markdown frontmatter includes capture times, timezone, duration, recording ID,
-language, and origin.
+M4A carries a minimal title, recorded date, and recording ID in standard audio
+tags. `Transcript.md` exists before transcription begins, so the recording's
+title, capture interval, status, and calendar-event snapshot remain beside the
+audio even if transcription is delayed or fails. Successful transcription
+replaces only the app's placeholder body. Attendee names are deliberately
+excluded from this portable metadata.
 
 Passages with low transcription or speaker confidence are marked _[review]_
 without adding confidence scores to every line.
 
-Recoverable chunks and structured transcription data remain private under
-`~/Library/Application Support/Call Recorder/Recordings`. Temporary audio is
-removed only after the published M4A has been reopened and validated.
+Recoverable chunks, attendee names, workflow state, and structured
+transcription data remain private under `~/Library/Application Support/Call
+Recorder/Recordings`. Temporary audio is removed only after the published M4A
+has been reopened and validated.
 
 If finalization or transcription fails, the retained recording appears in
 **Recordings** with a recovery or retry action. A failed upload never deletes
@@ -176,7 +181,9 @@ Before relying on the app, make one short test recording:
 4. Stop and confirm the default devices are unchanged.
 5. Confirm `Audio.m4a` plays both sides and `afinfo Audio.m4a` reports two
    channels.
-6. Confirm `Transcript.md` appears with a valid Deepgram key.
+6. Confirm `Transcript.md` appears as soon as audio finalization succeeds. With
+   a valid Deepgram key, confirm its status becomes `complete` and its body
+   contains the transcript.
 7. Repeat once with networking unavailable after recording, then reconnect and
    verify **Retry Transcription** succeeds.
 

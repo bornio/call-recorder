@@ -27,6 +27,7 @@ public struct TranscriptionService: Sendable {
         }
         recording.lastFailure = nil
         try store.save(recording)
+        _ = try? store.synchronizeTranscriptMetadata(for: recording)
 
         do {
             let response: Data
@@ -59,22 +60,19 @@ public struct TranscriptionService: Sendable {
                 document: document,
                 recording: recording
             )
-            var markdownURL = try preferredMarkdownURL(
+            let preferredURL = try preferredMarkdownURL(
                 for: recording,
                 audioURL: audioURL,
                 privateDirectory: directory,
                 store: store
             )
-            markdownURL = store.availableURL(for: markdownURL)
             let markdownData = Data(markdown.utf8)
-            while true {
-                do {
-                    try AtomicFilePublisher.publishNewFile(markdownData, to: markdownURL)
-                    break
-                } catch AtomicFilePublisherError.destinationExists {
-                    markdownURL = store.availableURL(for: markdownURL)
-                }
-            }
+            let markdownURL = try publishMarkdown(
+                markdownData,
+                preferredURL: preferredURL,
+                recordingID: recording.id,
+                store: store
+            )
             try? FileManager.default.setAttributes(
                 [
                     .creationDate: recording.effectiveStartedAt,
@@ -97,6 +95,7 @@ public struct TranscriptionService: Sendable {
                 occurredAt: now
             )
             try store.save(recording)
+            _ = try? store.synchronizeTranscriptMetadata(for: recording)
             throw CancellationError()
         } catch {
             let transcriptionError = error
@@ -108,6 +107,7 @@ public struct TranscriptionService: Sendable {
             )
             do {
                 try store.save(recording)
+                _ = try? store.synchronizeTranscriptMetadata(for: recording)
             } catch {
                 throw TranscriptionServiceError.persistenceAfterFailure(
                     transcription: transcriptionError.localizedDescription,
@@ -115,6 +115,32 @@ public struct TranscriptionService: Sendable {
                 )
             }
             throw transcriptionError
+        }
+    }
+
+    private func publishMarkdown(
+        _ data: Data,
+        preferredURL: URL,
+        recordingID: UUID,
+        store: RecordingStore
+    ) throws -> URL {
+        if let existing = try? String(contentsOf: preferredURL, encoding: .utf8),
+           TranscriptMarkdownFormatter.isReplaceablePlaceholder(
+            existing,
+            recordingID: recordingID
+           ) {
+            try AtomicFilePublisher.replaceFile(data, at: preferredURL)
+            return preferredURL
+        }
+
+        var destination = store.availableURL(for: preferredURL)
+        while true {
+            do {
+                try AtomicFilePublisher.publishNewFile(data, to: destination)
+                return destination
+            } catch AtomicFilePublisherError.destinationExists {
+                destination = store.availableURL(for: preferredURL)
+            }
         }
     }
 

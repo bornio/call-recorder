@@ -207,51 +207,25 @@ public struct TranscriptDocument: Equatable, Sendable {
 }
 
 public enum TranscriptMarkdownFormatter {
+    private static let formatVersion = 1
+    private static let placeholderBody =
+        "\n# Call transcript\n\n_Transcript not available yet._\n"
     private static let reviewConfidenceThreshold = 0.75
 
     public static func format(
         document: TranscriptDocument,
         recording: RecordingManifest
     ) -> String {
+        var lines = transcriptHeader(recording: recording)
         let startedAt = recording.effectiveStartedAt
-        let endedAt = recording.effectiveEndedAt
         let timeZone = recording.timeZoneIdentifier ?? TimeZone.current.identifier
-        let audioFilename = recording.files.audio.map {
-            URL(fileURLWithPath: $0).lastPathComponent
-        } ?? ""
-        let meetingState = recording.effectiveMeetingAssociationState
-        let calendarMatchStatus = switch meetingState {
-        case .automatic, .manual: "matched"
-        case .unresolved: "unresolved"
-        case .none: "unmatched"
-        }
-        let calendarAssociationSource = switch meetingState {
-        case .automatic: "automatic"
-        case .manual: "manual"
-        case .unresolved, .none: "null"
-        }
-        var lines = [
-            "---",
-            "recording_id: \(yaml(recording.id.uuidString))",
-            "started_at: \(yaml(iso8601(startedAt)))",
-            "ended_at: \(endedAt.map { yaml(iso8601($0)) } ?? "null")",
-            "timezone: \(yaml(timeZone))",
-            "duration_seconds: \(recording.durationSeconds.map { duration($0) } ?? "null")",
-            "language: \(yaml(recording.language.rawValue))",
-            "origin: \(yaml(recording.effectiveOrigin.rawValue))",
-            "timestamp_source: \(yaml(recording.effectiveTimestampSource.rawValue))",
-            "audio_file: \(yaml(audioFilename))",
-            "calendar_match_status: \(calendarMatchStatus)",
-            "calendar_association_source: \(calendarAssociationSource)",
-            "calendar_event_id: \(recording.calendarEventIdentifier.map(yaml) ?? "null")",
-            "calendar_title: \(recording.calendarTitle.map(yaml) ?? "null")",
-            "---",
+        lines.append(contentsOf: [
             "",
             "# Call transcript",
             "",
             "- Recorded: \(humanDate(startedAt, timeZoneIdentifier: timeZone)) (\(timeZone))",
             "- Language: \(recording.language.displayName)",
-        ]
+        ])
         if recording.effectiveOrigin == .nativeRecording {
             lines.append("- Channel 0: Remote/system audio")
             lines.append(
@@ -289,6 +263,145 @@ public enum TranscriptMarkdownFormatter {
             }
         }
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    public static func placeholder(recording: RecordingManifest) -> String {
+        frontmatter(recording: recording) + placeholderBody
+    }
+
+    static func updatingMetadata(
+        in markdown: String,
+        recording: RecordingManifest
+    ) -> String? {
+        guard let parts = frontmatterParts(in: markdown),
+              belongsToRecording(parts.lines, recordingID: recording.id)
+        else { return nil }
+        return frontmatter(recording: recording) + parts.body
+    }
+
+    static func isReplaceablePlaceholder(
+        _ markdown: String,
+        recordingID: UUID
+    ) -> Bool {
+        guard let parts = frontmatterParts(in: markdown),
+              belongsToRecording(parts.lines, recordingID: recordingID)
+        else { return false }
+        return parts.body == placeholderBody
+    }
+
+    static func isCompletedTranscript(
+        _ markdown: String,
+        recordingID: UUID
+    ) -> Bool {
+        guard let parts = frontmatterParts(in: markdown),
+              belongsToRecording(parts.lines, recordingID: recordingID)
+        else { return false }
+        if parts.lines.contains("transcription_status: complete") {
+            return true
+        }
+        let hasPortableStatus = parts.lines.contains {
+            $0.hasPrefix("transcription_status:")
+        }
+        return !hasPortableStatus && parts.body.contains("\n## Transcript\n")
+    }
+
+    private static func transcriptHeader(recording: RecordingManifest) -> [String] {
+        frontmatterLines(recording: recording, transcriptionStatus: .complete)
+    }
+
+    private static func frontmatter(recording: RecordingManifest) -> String {
+        frontmatterLines(
+            recording: recording,
+            transcriptionStatus: recording.transcriptionStatus
+        ).joined(separator: "\n") + "\n"
+    }
+
+    private static func frontmatterLines(
+        recording: RecordingManifest,
+        transcriptionStatus: TranscriptionStatus
+    ) -> [String] {
+        let startedAt = recording.effectiveStartedAt
+        let endedAt = recording.effectiveEndedAt
+        let timeZone = recording.timeZoneIdentifier ?? TimeZone.current.identifier
+        let audioFilename = recording.files.audio.map {
+            URL(fileURLWithPath: $0).lastPathComponent
+        } ?? (recording.effectiveOrigin == .nativeRecording ? "Audio.m4a" : "")
+        let meetingState = recording.effectiveMeetingAssociationState
+        let calendarMatchStatus = switch meetingState {
+        case .automatic, .manual: "matched"
+        case .unresolved: "unresolved"
+        case .none: "unmatched"
+        }
+        let calendarAssociationSource = switch meetingState {
+        case .automatic: "automatic"
+        case .manual: "manual"
+        case .unresolved, .none: "null"
+        }
+        return [
+            "---",
+            "call_recorder_format: \(formatVersion)",
+            "recording_id: \(yaml(recording.id.uuidString))",
+            "title: \(recording.title.map(yaml) ?? "null")",
+            "title_source: \(recording.effectiveTitleSource.map { $0.rawValue } ?? "null")",
+            "started_at: \(yaml(iso8601(startedAt)))",
+            "ended_at: \(endedAt.map { yaml(iso8601($0)) } ?? "null")",
+            "timezone: \(yaml(timeZone))",
+            "duration_seconds: \(recording.durationSeconds.map { duration($0) } ?? "null")",
+            "language: \(yaml(recording.language.rawValue))",
+            "origin: \(yaml(recording.effectiveOrigin.rawValue))",
+            "timestamp_source: \(yaml(recording.effectiveTimestampSource.rawValue))",
+            "audio_file: \(yaml(audioFilename))",
+            "transcription_status: \(portableStatus(transcriptionStatus))",
+            "meeting_association: \(meetingState.rawValue)",
+            "calendar_match_status: \(calendarMatchStatus)",
+            "calendar_association_source: \(calendarAssociationSource)",
+            "calendar_event_id: \(recording.calendarEventIdentifier.map(yaml) ?? "null")",
+            "calendar_title: \(recording.calendarTitle.map(yaml) ?? "null")",
+            "calendar_started_at: \(recording.calendarStartDate.map { yaml(iso8601($0)) } ?? "null")",
+            "calendar_ended_at: \(recording.calendarEndDate.map { yaml(iso8601($0)) } ?? "null")",
+            "---",
+        ]
+    }
+
+    private static func portableStatus(_ status: TranscriptionStatus) -> String {
+        switch status {
+        case .notStarted: "pending"
+        case .waitingForCredential: "waiting_for_credential"
+        case .transcribing: "transcribing"
+        case .complete: "complete"
+        case .failed: "failed"
+        }
+    }
+
+    private static func frontmatterParts(
+        in markdown: String
+    ) -> (lines: [Substring], body: String)? {
+        guard markdown.hasPrefix("---\n"),
+              let searchStart = markdown.index(
+                markdown.startIndex,
+                offsetBy: "---\n".count,
+                limitedBy: markdown.endIndex
+              ),
+              let closing = markdown.range(
+                of: "\n---\n",
+                range: searchStart..<markdown.endIndex
+              )
+        else { return nil }
+        let contentStart = searchStart
+        let contentEnd = closing.lowerBound
+        return (
+            lines: markdown[contentStart..<contentEnd].split(separator: "\n"),
+            body: String(markdown[closing.upperBound...])
+        )
+    }
+
+    private static func belongsToRecording(
+        _ frontmatterLines: [Substring],
+        recordingID: UUID
+    ) -> Bool {
+        frontmatterLines.contains(
+            Substring("recording_id: \(yaml(recordingID.uuidString))")
+        )
     }
 
     private static func timestamp(_ seconds: Double) -> String {

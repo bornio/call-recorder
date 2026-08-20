@@ -4,7 +4,7 @@ import Foundation
 @testable import CallRecorderCore
 
 @MainActor
-func runRecordingFinalizerTests() throws {
+func runRecordingFinalizerTests() async throws {
     try runTest("finalizer reads valid partial CAF reads through end of file") {
         try withTemporaryDirectory(prefix: "CallRecorderFinalizerTests") { root in
             let systemDirectory = root.appendingPathComponent("system", isDirectory: true)
@@ -139,8 +139,8 @@ func runRecordingFinalizerTests() throws {
         }
     }
 
-    try runTest("post-processing recovers closed chunks into the planned destination") {
-        try withTemporaryDirectory(prefix: "CallRecorderFinalizerTests") { root in
+    try await runAsyncTest("post-processing recovers closed chunks into the planned destination") {
+        try await withTemporaryDirectory(prefix: "CallRecorderFinalizerTests") { root in
             let store = RecordingStore(rootDirectory: root.appendingPathComponent("history"))
             var recording = try store.createRecording(
                 language: .english,
@@ -176,7 +176,7 @@ func runRecordingFinalizerTests() throws {
             recording.files.exportDirectory = destination.path
             try store.save(recording)
 
-            let result = try RecordingPostProcessor().process(
+            let result = try await RecordingPostProcessor().process(
                 recording: recording,
                 store: store
             )

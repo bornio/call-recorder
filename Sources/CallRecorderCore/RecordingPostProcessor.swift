@@ -25,7 +25,7 @@ public struct RecordingPostProcessor: Sendable {
     public func process(
         recording: RecordingManifest,
         store: RecordingStore
-    ) throws -> RecordingPostProcessingResult {
+    ) async throws -> RecordingPostProcessingResult {
         guard let exportPath = recording.files.exportDirectory else {
             throw RecordingPostProcessorError.missingPublicationDestination
         }
@@ -57,7 +57,7 @@ public struct RecordingPostProcessor: Sendable {
             microphoneCaptureDirectory: microphoneDirectory,
             outputURL: waveURL
         )
-        let publication = try audioExportService.publish(
+        let publication = try await audioExportService.publish(
             waveURL: waveURL,
             recording: recording,
             exportRoot: destinationDirectory.deletingLastPathComponent(),
@@ -65,7 +65,7 @@ public struct RecordingPostProcessor: Sendable {
         )
         return RecordingPostProcessingResult(
             publication: publication,
-            warnings: finalization.warnings
+            warnings: finalization.warnings + publication.warnings
         )
     }
 }

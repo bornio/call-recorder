@@ -1,10 +1,9 @@
 @preconcurrency import AVFoundation
-import AudioToolbox
 import Foundation
 @testable import CallRecorderCore
 
 @MainActor
-func runAudioExportServiceTests() throws {
+func runAudioExportServiceTests() async throws {
     try runTest("publication destinations respect paths reserved by queued recordings") {
         let service = AudioExportService()
         let root = URL(fileURLWithPath: "/tmp/call-recorder-output", isDirectory: true)
@@ -30,8 +29,8 @@ func runAudioExportServiceTests() throws {
         try expect(firstPath != secondPath)
     }
 
-    try runTest("a finalized WAV publishes, recovers, and avoids collisions") {
-        try withTemporaryDirectory(prefix: "CallRecorderAudioExportTests") { root in
+    try await runAsyncTest("a finalized WAV publishes, recovers, and avoids collisions") {
+        try await withTemporaryDirectory(prefix: "CallRecorderAudioExportTests") { root in
             let waveURL = root.appendingPathComponent("audio.wav")
             try writeStereoWave(to: waveURL, seconds: 2)
 
@@ -44,6 +43,19 @@ func runAudioExportServiceTests() throws {
             recording.captureStartedAt = Date(timeIntervalSince1970: 1_720_600_200)
             recording.captureEndedAt = Date(timeIntervalSince1970: 1_720_600_202)
             recording.timeZoneIdentifier = "Asia/Jerusalem"
+            recording.title = "Product roadmap review"
+            recording.titleSource = .user
+            recording.assignMeeting(
+                CalendarEventCandidate(
+                    identifier: "event-123",
+                    title: "Roadmap calendar event",
+                    startDate: Date(timeIntervalSince1970: 1_720_600_000),
+                    endDate: Date(timeIntervalSince1970: 1_720_603_600),
+                    attendeeNames: ["Private attendee"]
+                ),
+                state: .manual,
+                updateCalendarTitle: false
+            )
             let exportRoot = root.appendingPathComponent("exports", isDirectory: true)
 
             let exportService = AudioExportService()
@@ -51,7 +63,7 @@ func runAudioExportServiceTests() throws {
                 for: recording,
                 in: exportRoot
             )
-            let published = try exportService.publish(
+            let published = try await exportService.publish(
                 waveURL: waveURL,
                 recording: recording,
                 exportRoot: exportRoot,
@@ -69,9 +81,40 @@ func runAudioExportServiceTests() throws {
                 includingPropertiesForKeys: nil,
                 options: [.skipsHiddenFiles]
             )
-            try expectEqual(publicFiles.map(\.lastPathComponent), ["Audio.m4a"])
+            try expectEqual(
+                publicFiles.map(\.lastPathComponent).sorted(),
+                ["Audio.m4a", "Transcript.md"]
+            )
+            let placeholder = try String(
+                contentsOf: published.directoryURL.appendingPathComponent("Transcript.md"),
+                encoding: .utf8
+            )
+            try expect(placeholder.contains("title: \"Product roadmap review\""))
+            try expect(placeholder.contains("transcription_status: pending"))
+            try expect(placeholder.contains("meeting_association: manual"))
+            try expect(placeholder.contains("calendar_event_id: \"event-123\""))
+            try expect(placeholder.contains("calendar_started_at:"))
+            try expect(!placeholder.contains("Private attendee"))
             let compressed = try AVAudioFile(forReading: published.audioURL)
             try expectEqual(compressed.processingFormat.channelCount, 2)
+            let audioMetadata = try await audioMetadata(at: published.audioURL)
+            try expectEqual(
+                audioMetadata[AVMetadataIdentifier.iTunesMetadataSongName.rawValue],
+                "Product roadmap review"
+            )
+            try expectEqual(
+                audioMetadata[AVMetadataIdentifier.iTunesMetadataReleaseDate.rawValue],
+                "2024-07-10T08:30:00.000Z"
+            )
+            try expectEqual(
+                audioMetadata[AVMetadataIdentifier.iTunesMetadataUserComment.rawValue],
+                "Recording ID: \(recording.id.uuidString)"
+            )
+            try expectEqual(
+                audioMetadata[AVMetadataIdentifier.iTunesMetadataEncodingTool.rawValue],
+                "Call Recorder"
+            )
+            try expectEqual(published.warnings, [])
 
             let recovered = try AudioExportService().recoverPublication(
                 in: published.directoryURL,
@@ -104,14 +147,14 @@ func runAudioExportServiceTests() throws {
             interrupted.captureStatus = .processing
             interrupted.files.exportDirectory = published.directoryURL.path
             interrupted.files.audio = nil
-            let postProcessed = try RecordingPostProcessor().process(
+            let postProcessed = try await RecordingPostProcessor().process(
                 recording: interrupted,
                 store: RecordingStore(rootDirectory: root.appendingPathComponent("history"))
             )
             try expectEqual(postProcessed.publication.audioURL, published.audioURL)
             try expectEqual(postProcessed.warnings, [])
 
-            let collision = try AudioExportService().publish(
+            let collision = try await AudioExportService().publish(
                 waveURL: waveURL,
                 recording: recording,
                 exportRoot: exportRoot
@@ -120,8 +163,8 @@ func runAudioExportServiceTests() throws {
         }
     }
 
-    try runTest("unrelated audio is never accepted as an interrupted publication") {
-        try withTemporaryDirectory(prefix: "CallRecorderAudioExportTests") { root in
+    try await runAsyncTest("unrelated audio is never accepted as an interrupted publication") {
+        try await withTemporaryDirectory(prefix: "CallRecorderAudioExportTests") { root in
             let destination = root.appendingPathComponent("Call", isDirectory: true)
             try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
             try Data([1, 2, 3]).write(to: destination.appendingPathComponent("Audio.m4a"))
@@ -133,14 +176,14 @@ func runAudioExportServiceTests() throws {
             recording.captureStatus = .processing
             recording.files.exportDirectory = destination.path
 
-            try expectThrows(
+            try await expectThrows(
                 AudioExportError.self,
                 matching: {
                     if case .publicationDoesNotBelongToRecording = $0 { return true }
                     return false
                 }
             ) {
-                try RecordingPostProcessor().process(
+                try await RecordingPostProcessor().process(
                     recording: recording,
                     store: RecordingStore(rootDirectory: root.appendingPathComponent("history"))
                 )
@@ -234,4 +277,19 @@ private func writeStereoWave(to url: URL, seconds: Int) throws {
         }
         try file.write(from: buffer)
     }
+}
+
+private func audioMetadata(at url: URL) async throws -> [String: String] {
+    let asset = AVURLAsset(url: url)
+    let formats = try await asset.load(.availableMetadataFormats)
+    var metadata: [String: String] = [:]
+    for format in formats {
+        for item in try await asset.loadMetadata(for: format) {
+            guard let identifier = item.identifier,
+                  let value = try await item.load(.stringValue)
+            else { continue }
+            metadata[identifier.rawValue] = value
+        }
+    }
+    return metadata
 }

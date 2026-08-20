@@ -6,11 +6,18 @@ public struct PublishedRecordingAudio: Equatable, Sendable {
     public var directoryURL: URL
     public var audioURL: URL
     public var durationSeconds: Double
+    public var warnings: [String]
 
-    public init(directoryURL: URL, audioURL: URL, durationSeconds: Double) {
+    public init(
+        directoryURL: URL,
+        audioURL: URL,
+        durationSeconds: Double,
+        warnings: [String] = []
+    ) {
         self.directoryURL = directoryURL
         self.audioURL = audioURL
         self.durationSeconds = durationSeconds
+        self.warnings = warnings
     }
 }
 
@@ -50,7 +57,7 @@ public struct AudioExportService: Sendable {
         recording: RecordingManifest,
         exportRoot: URL,
         destinationDirectory: URL? = nil
-    ) throws -> PublishedRecordingAudio {
+    ) async throws -> PublishedRecordingAudio {
         let source = try AVAudioFile(forReading: waveURL)
         guard source.processingFormat.channelCount == 2,
               source.processingFormat.sampleRate > 0,
@@ -79,11 +86,36 @@ public struct AudioExportService: Sendable {
             }
         }
 
+        let encodedAudio = stagingDirectory.appendingPathComponent(".Audio-encoded.m4a")
         let stagedAudio = stagingDirectory.appendingPathComponent("Audio.m4a")
-        try encodeM4A(source: source, destination: stagedAudio)
+        try encodeM4A(source: source, destination: encodedAudio)
+        var warnings: [String] = []
+        do {
+            try await writePortableMetadata(
+                from: encodedAudio,
+                to: stagedAudio,
+                recording: recording
+            )
+            try FileManager.default.removeItem(at: encodedAudio)
+        } catch {
+            warnings.append("Audio metadata could not be written: \(error.localizedDescription)")
+            try? FileManager.default.removeItem(at: stagedAudio)
+            try FileManager.default.moveItem(at: encodedAudio, to: stagedAudio)
+        }
         let validatedDuration = try validate(
             audioURL: stagedAudio,
             expectedDuration: Double(source.length) / source.processingFormat.sampleRate
+        )
+        var portableRecording = recording
+        portableRecording.durationSeconds = validatedDuration
+        portableRecording.files.audio = "Audio.m4a"
+        portableRecording.files.transcriptMarkdown = "Transcript.md"
+        let placeholder = TranscriptMarkdownFormatter.placeholder(
+            recording: portableRecording
+        )
+        try Data(placeholder.utf8).write(
+            to: stagingDirectory.appendingPathComponent("Transcript.md"),
+            options: [.atomic]
         )
         let marker = PublicationMarker(version: 1, recordingID: recording.id)
         let markerData = try JSONEncoder().encode(marker)
@@ -122,7 +154,8 @@ public struct AudioExportService: Sendable {
         return PublishedRecordingAudio(
             directoryURL: destinationDirectory,
             audioURL: audioURL,
-            durationSeconds: validatedDuration
+            durationSeconds: validatedDuration,
+            warnings: warnings
         )
     }
 
@@ -257,6 +290,51 @@ public struct AudioExportService: Sendable {
         }
     }
 
+    private func writePortableMetadata(
+        from sourceURL: URL,
+        to destinationURL: URL,
+        recording: RecordingManifest
+    ) async throws {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let asset = AVURLAsset(url: sourceURL)
+        guard let exporter = AVAssetExportSession(
+            asset: asset,
+            presetName: AVAssetExportPresetPassthrough
+        ) else {
+            throw AudioMetadataError.unavailableExporter
+        }
+        exporter.metadata = [
+            metadataItem(
+                identifier: .iTunesMetadataSongName,
+                value: recording.displayTitle
+            ),
+            metadataItem(
+                identifier: .iTunesMetadataReleaseDate,
+                value: formatter.string(from: recording.effectiveStartedAt)
+            ),
+            metadataItem(
+                identifier: .iTunesMetadataUserComment,
+                value: "Recording ID: \(recording.id.uuidString)"
+            ),
+            metadataItem(
+                identifier: .iTunesMetadataEncodingTool,
+                value: "Call Recorder"
+            ),
+        ]
+        try await exporter.export(to: destinationURL, as: .m4a)
+    }
+
+    private func metadataItem(
+        identifier: AVMetadataIdentifier,
+        value: String
+    ) -> AVMetadataItem {
+        let item = AVMutableMetadataItem()
+        item.identifier = identifier
+        item.value = value as NSString
+        return item
+    }
+
     private func validate(audioURL: URL, expectedDuration: Double?) throws -> Double {
         let audio: AVAudioFile
         do {
@@ -301,5 +379,13 @@ public struct AudioExportService: Sendable {
             }
             suffix += 1
         }
+    }
+}
+
+private enum AudioMetadataError: LocalizedError {
+    case unavailableExporter
+
+    var errorDescription: String? {
+        "The native MPEG-4 metadata exporter is unavailable."
     }
 }

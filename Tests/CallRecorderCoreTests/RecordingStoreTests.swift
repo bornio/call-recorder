@@ -349,7 +349,6 @@ func runRecordingStoreTests() throws {
             let originalAudio = originalFolder.appendingPathComponent("Audio.m4a")
             let originalTranscript = originalFolder.appendingPathComponent("Transcript.md")
             try Data([1, 2, 3]).write(to: originalAudio)
-            try Data("transcript".utf8).write(to: originalTranscript)
 
             recording.captureStatus = .complete
             recording.transcriptionStatus = .failed
@@ -361,6 +360,11 @@ func runRecordingStoreTests() throws {
             recording.files.audio = originalAudio.path
             recording.files.audioBookmark = try store.bookmark(for: originalAudio)
             recording.files.transcriptMarkdown = originalTranscript.path
+            var completedTranscript = recording
+            completedTranscript.transcriptionStatus = .complete
+            try Data(
+                TranscriptMarkdownFormatter.placeholder(recording: completedTranscript).utf8
+            ).write(to: originalTranscript)
             recording.files.transcriptBookmark = try store.bookmark(for: originalTranscript)
             try store.save(recording)
             let privateJSON = try store.directory(for: recording)
@@ -643,6 +647,82 @@ func runRecordingStoreTests() throws {
                     .checkResourceIsReachable()
             }
             try expectEqual(try store.loadAll().first?.id, recording.id)
+        }
+    }
+
+    try runTest("portable transcript metadata sync preserves its body") {
+        try withTemporaryDirectory { root in
+            let store = RecordingStore(rootDirectory: root.appendingPathComponent("history"))
+            var recording = try store.createRecording(
+                language: .english,
+                microphoneUID: "mic",
+                microphoneName: "Mic"
+            )
+            let publicFolder = root.appendingPathComponent("Call", isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: publicFolder,
+                withIntermediateDirectories: true
+            )
+            let transcript = publicFolder.appendingPathComponent("Transcript.md")
+            let audio = publicFolder.appendingPathComponent("Audio.m4a")
+            try Data([1, 2, 3]).write(to: audio)
+            recording.captureStatus = .complete
+            recording.files.audio = audio.path
+            recording.files.audioBookmark = try store.bookmark(for: audio)
+            recording.files.transcriptMarkdown = transcript.path
+            try Data(
+                TranscriptMarkdownFormatter.placeholder(recording: recording)
+                    .replacingOccurrences(
+                        of: "_Transcript not available yet._",
+                        with: "A note kept with the recording."
+                    )
+                    .utf8
+            ).write(to: transcript)
+            recording.files.transcriptBookmark = try store.bookmark(for: transcript)
+
+            recording.title = "Renamed planning call"
+            recording.titleSource = .user
+            recording.transcriptionStatus = .failed
+            recording.assignMeeting(
+                CalendarEventCandidate(
+                    identifier: "event-42",
+                    title: "Calendar planning call",
+                    startDate: Date(timeIntervalSince1970: 100),
+                    endDate: Date(timeIntervalSince1970: 200),
+                    attendeeNames: ["Private attendee"],
+                    calendarName: "Work"
+                ),
+                state: .manual,
+                updateCalendarTitle: false
+            )
+            try store.save(recording)
+
+            try expectEqual(
+                try store.synchronizeTranscriptMetadata(for: recording),
+                .updated
+            )
+            let updated = try String(contentsOf: transcript, encoding: .utf8)
+            try expect(updated.contains("title: \"Renamed planning call\""))
+            try expect(updated.contains("transcription_status: failed"))
+            try expect(updated.contains("calendar_event_id: \"event-42\""))
+            try expect(updated.contains("A note kept with the recording."))
+            try expect(!updated.contains("Private attendee"))
+
+            let movedFolder = root.appendingPathComponent("Renamed Call", isDirectory: true)
+            try FileManager.default.moveItem(at: publicFolder, to: movedFolder)
+            let reconciled = try require(try store.reconcileExternalFiles().first)
+            let movedTranscript = movedFolder.appendingPathComponent("Transcript.md")
+            try expectEqual(reconciled.files.transcriptMarkdown, movedTranscript.path)
+
+            let foreign = updated.replacingOccurrences(
+                of: recording.id.uuidString,
+                with: UUID().uuidString
+            )
+            try Data(foreign.utf8).write(to: movedTranscript)
+            try expectEqual(
+                try store.synchronizeTranscriptMetadata(for: reconciled),
+                .notOwned
+            )
         }
     }
 

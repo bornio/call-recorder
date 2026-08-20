@@ -5,7 +5,7 @@ struct TestFailure: Error, CustomStringConvertible {
 }
 
 @MainActor private var completedTestCount = 0
-private let expectedTestCount = 77
+private let expectedTestCount = 79
 
 @MainActor
 func runTest(_ name: String, _ body: () throws -> Void) throws {
@@ -131,8 +131,8 @@ struct CallRecorderTestRunner {
             try runRecordingPresentationTests()
             try runRecordingStoreTests()
             try runDeepgramAndTranscriptTests()
-            try runRecordingFinalizerTests()
-            try runAudioExportServiceTests()
+            try await runRecordingFinalizerTests()
+            try await runAudioExportServiceTests()
             try await runTranscriptionServiceTests()
             try await runRecordingJobQueueTests()
             guard completedTestCount == expectedTestCount else {

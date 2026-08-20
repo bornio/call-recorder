@@ -60,8 +60,11 @@ func runTranscriptionServiceTests() async throws {
             recording.files.exportDirectory = publicDirectory.path
             recording.files.audio = audioURL.path
             recording.files.audioBookmark = try store.bookmark(for: audioURL)
-            recording.files.transcriptMarkdown = publicDirectory
-                .appendingPathComponent("Transcript.md").path
+            let transcriptURL = publicDirectory.appendingPathComponent("Transcript.md")
+            recording.files.transcriptMarkdown = transcriptURL.path
+            try Data(TranscriptMarkdownFormatter.placeholder(recording: recording).utf8)
+                .write(to: transcriptURL)
+            recording.files.transcriptBookmark = try store.bookmark(for: transcriptURL)
             try store.save(recording)
             try store.removeCaptureArtifacts(for: recording)
 
@@ -86,7 +89,9 @@ func runTranscriptionServiceTests() async throws {
             let markdownURL = try require(try store.transcriptURL(for: completed))
             let markdown = try String(contentsOf: markdownURL, encoding: .utf8)
             try expect(markdown.contains("started_at: \"2024-07-10T08:30:00.000Z\""))
+            try expect(markdown.contains("transcription_status: complete"))
             try expect(markdown.contains("[00:00:00.600] **Taylor:** Hi"))
+            try expect(!markdown.contains("_Transcript not available yet._"))
         }
     }
 
@@ -109,8 +114,11 @@ func runTranscriptionServiceTests() async throws {
             recording.files.exportDirectory = publicDirectory.path
             recording.files.audio = audioURL.path
             recording.files.audioBookmark = try store.bookmark(for: audioURL)
-            recording.files.transcriptMarkdown = publicDirectory
-                .appendingPathComponent("Transcript.md").path
+            let transcriptURL = publicDirectory.appendingPathComponent("Transcript.md")
+            recording.files.transcriptMarkdown = transcriptURL.path
+            try Data(TranscriptMarkdownFormatter.placeholder(recording: recording).utf8)
+                .write(to: transcriptURL)
+            recording.files.transcriptBookmark = try store.bookmark(for: transcriptURL)
             try store.save(recording)
 
             try await expectThrows(
@@ -130,11 +138,9 @@ func runTranscriptionServiceTests() async throws {
             try expectEqual(failed.transcriptionStatus, .failed)
             try expect(TranscriptionRetryPolicy.canRetry(failed))
             try expect(FileManager.default.fileExists(atPath: audioURL.path))
-            try expect(
-                !FileManager.default.fileExists(
-                    atPath: publicDirectory.appendingPathComponent("Transcript.md").path
-                )
-            )
+            let retainedPlaceholder = try String(contentsOf: transcriptURL, encoding: .utf8)
+            try expect(retainedPlaceholder.contains("transcription_status: failed"))
+            try expect(retainedPlaceholder.contains("_Transcript not available yet._"))
         }
     }
 

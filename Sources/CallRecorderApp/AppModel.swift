@@ -1251,6 +1251,7 @@ final class AppModel: ObservableObject {
         recording.assignMeeting(event, state: .manual, updateCalendarTitle: true)
         do {
             try store.save(recording)
+            synchronizePortableMetadata(for: recording)
             reloadHistory()
         } catch {
             historyErrorMessage = error.localizedDescription
@@ -1264,6 +1265,7 @@ final class AppModel: ObservableObject {
         recording.clearMeetingAssociation(keepCandidates: false)
         do {
             try store.save(recording)
+            synchronizePortableMetadata(for: recording)
             reloadHistory()
         } catch {
             historyErrorMessage = error.localizedDescription
@@ -1278,6 +1280,7 @@ final class AppModel: ObservableObject {
             recording.title = RecordingManifest.normalizedTitle(title)
             recording.titleSource = recording.title == nil ? nil : .user
             try store.save(recording)
+            synchronizePortableMetadata(for: recording)
             reloadHistory()
             return true
         } catch {
@@ -1311,6 +1314,28 @@ final class AppModel: ObservableObject {
             !isPerformingStartupCleanup &&
             activeCapture?.id != recording.id &&
             !jobQueue.isWorking(on: recording.id)
+    }
+
+    private func synchronizePortableMetadata(for recording: RecordingManifest) {
+        do {
+            switch try store.synchronizeTranscriptMetadata(for: recording) {
+            case .noFile:
+                if recording.effectiveOrigin == .nativeRecording,
+                   recording.files.audio != nil {
+                    historyErrorMessage =
+                        "The change was saved in app history, but Transcript.md is unavailable."
+                }
+            case .notOwned:
+                historyErrorMessage =
+                    "The change was saved in app history, but Transcript.md belongs to another recording."
+            case .unchanged, .updated:
+                break
+            }
+        } catch {
+            historyErrorMessage =
+                "The change was saved in app history, but Transcript.md could not be updated: "
+                    + error.localizedDescription
+        }
     }
 
     func copyTranscript(in recording: RecordingManifest) {
@@ -1383,6 +1408,7 @@ final class AppModel: ObservableObject {
                 recording.files.transcriptJSON = nil
             }
             try store.save(recording)
+            _ = try? store.synchronizeTranscriptMetadata(for: recording)
             reloadHistory()
             jobQueue.wake()
         } catch {
@@ -2180,6 +2206,7 @@ final class AppModel: ObservableObject {
                     recording.lastFailure = nil
                 }
                 try store.save(recording)
+                _ = try? store.synchronizeTranscriptMetadata(for: recording)
             }
             reloadHistory()
             jobQueue.wake()

@@ -381,7 +381,7 @@ private struct CalendarContextView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    Text("Meeting title, time, and attendee names are saved locally with the recording.")
+                    Text("Meeting title and time stay in Transcript.md. Attendee names remain only in private app history.")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }

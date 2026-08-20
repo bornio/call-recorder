@@ -199,9 +199,12 @@ func runRecordingJobQueueTests() async throws {
             try await changed.wait()
 
             try expectEqual(changes.values, [nil])
-            try expectEqual(
-                try store.load(id: recording.id).transcriptionStatus,
-                .waitingForCredential
+            let waiting = try store.load(id: recording.id)
+            try expectEqual(waiting.transcriptionStatus, .waitingForCredential)
+            let transcript = try require(try store.transcriptURL(for: waiting))
+            let markdown = try String(contentsOf: transcript, encoding: .utf8)
+            try expect(
+                markdown.contains("transcription_status: waiting_for_credential")
             )
             queue.shutdownImmediately()
         }
@@ -662,7 +665,11 @@ private func queuedTranscriptionRecording(
     recording.transcriptionStatus = .notStarted
     recording.files.exportDirectory = output.path
     recording.files.audio = audio.path
-    recording.files.transcriptMarkdown = output.appendingPathComponent("Transcript.md").path
+    let transcript = output.appendingPathComponent("Transcript.md")
+    recording.files.transcriptMarkdown = transcript.path
+    try Data(TranscriptMarkdownFormatter.placeholder(recording: recording).utf8)
+        .write(to: transcript)
+    recording.files.transcriptBookmark = try store.bookmark(for: transcript)
     try store.save(recording)
     return recording
 }

@@ -115,8 +115,14 @@ func runDeepgramAndTranscriptTests() throws {
         recording.captureEndedAt = Date(timeIntervalSince1970: 1_102.625)
         recording.timeZoneIdentifier = "Asia/Jerusalem"
         recording.durationSeconds = 2.5
+        recording.title = "Planning review"
+        recording.titleSource = .user
         recording.files.audio = "/tmp/Audio.m4a"
         let markdown = TranscriptMarkdownFormatter.format(document: document, recording: recording)
+        try expect(markdown.contains("call_recorder_format: 1"))
+        try expect(markdown.contains("title: \"Planning review\""))
+        try expect(markdown.contains("title_source: user"))
+        try expect(markdown.contains("transcription_status: complete"))
         try expect(markdown.contains("started_at: \"1970-01-01T00:18:20.125Z\""))
         try expect(markdown.contains("ended_at: \"1970-01-01T00:18:22.625Z\""))
         try expect(markdown.contains("timezone: \"Asia/Jerusalem\""))
@@ -132,6 +138,9 @@ func runDeepgramAndTranscriptTests() throws {
 
         recording.calendarEventIdentifier = "event-123"
         recording.calendarTitle = "Product roadmap review"
+        recording.calendarStartDate = Date(timeIntervalSince1970: 1_000)
+        recording.calendarEndDate = Date(timeIntervalSince1970: 2_000)
+        recording.calendarAttendeeNames = ["Private attendee"]
         recording.meetingAssociationState = .automatic
         let calendarMarkdown = TranscriptMarkdownFormatter.format(
             document: document,
@@ -141,6 +150,9 @@ func runDeepgramAndTranscriptTests() throws {
         try expect(calendarMarkdown.contains("calendar_association_source: automatic"))
         try expect(calendarMarkdown.contains("calendar_event_id: \"event-123\""))
         try expect(calendarMarkdown.contains("calendar_title: \"Product roadmap review\""))
+        try expect(calendarMarkdown.contains("calendar_started_at:"))
+        try expect(calendarMarkdown.contains("calendar_ended_at:"))
+        try expect(!calendarMarkdown.contains("Private attendee"))
 
         recording.markMeetingUnresolved(candidates: [])
         let unresolvedMarkdown = TranscriptMarkdownFormatter.format(
@@ -163,6 +175,63 @@ func runDeepgramAndTranscriptTests() throws {
                 "[00:00:02.000] **Channel 1 · Speaker 0:** I agree."
             )
         )
+    }
+
+    try runTest("portable transcript metadata updates without replacing its body") {
+        var recording = RecordingManifest(
+            language: .english,
+            microphoneUID: "mic",
+            microphoneName: "Mic"
+        )
+        recording.captureStatus = .complete
+        recording.captureStartedAt = Date(timeIntervalSince1970: 100)
+        recording.captureEndedAt = Date(timeIntervalSince1970: 200)
+        recording.durationSeconds = 100
+        recording.files.audio = "/tmp/Audio.m4a"
+        let placeholder = TranscriptMarkdownFormatter.placeholder(recording: recording)
+        try expect(placeholder.contains("transcription_status: pending"))
+        try expect(TranscriptMarkdownFormatter.isReplaceablePlaceholder(
+            placeholder,
+            recordingID: recording.id
+        ))
+
+        let editedBody = placeholder.replacingOccurrences(
+            of: "_Transcript not available yet._",
+            with: "My retained note."
+        )
+        recording.title = "Renamed call"
+        recording.titleSource = .user
+        recording.transcriptionStatus = .failed
+        let updated = try require(
+            TranscriptMarkdownFormatter.updatingMetadata(
+                in: editedBody,
+                recording: recording
+            )
+        )
+
+        try expect(updated.contains("title: \"Renamed call\""))
+        try expect(updated.contains("transcription_status: failed"))
+        try expect(updated.contains("My retained note."))
+        try expect(!TranscriptMarkdownFormatter.isReplaceablePlaceholder(
+            updated,
+            recordingID: recording.id
+        ))
+
+        let legacyTranscript = """
+            ---
+            recording_id: "\(recording.id.uuidString)"
+            ---
+
+            # Call transcript
+
+            ## Transcript
+
+            [00:00:00.000] **Speaker 0:** Legacy text.
+            """
+        try expect(TranscriptMarkdownFormatter.isCompletedTranscript(
+            legacyTranscript,
+            recordingID: recording.id
+        ))
     }
 
     try runTest("Markdown uses persisted speaker labels and escapes Markdown punctuation") {

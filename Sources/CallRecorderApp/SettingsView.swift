@@ -60,7 +60,7 @@ struct SettingsView: View {
                             .disabled(!model.canChangeCaptureConfiguration)
                     }
                 }
-                Text("Each call is saved in its own folder with Audio.m4a and, when transcription succeeds, Transcript.md.")
+                Text("Each call is saved with Audio.m4a and Transcript.md. Recording details remain in the Markdown even if transcription fails.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if let error = model.outputDirectoryErrorMessage {

@@ -51,9 +51,7 @@ public final class RecordingJobQueue {
             store: store,
             apiKeyProvider: apiKeyProvider,
             finalize: { recording, store in
-                try await Task.detached(priority: .utility) {
-                    try postProcessor.process(recording: recording, store: store)
-                }.value
+                try await postProcessor.process(recording: recording, store: store)
             },
             transcribe: { recording, store, apiKey in
                 try await transcriptionService.transcribe(
@@ -212,8 +210,9 @@ public final class RecordingJobQueue {
             recording.files.exportDirectory = result.publication.directoryURL.path
             recording.files.audio = result.publication.audioURL.path
             recording.files.audioBookmark = try? store.bookmark(for: result.publication.audioURL)
-            recording.files.transcriptMarkdown = result.publication.directoryURL
-                .appendingPathComponent("Transcript.md").path
+            let transcriptURL = result.publication.directoryURL
+                .appendingPathComponent("Transcript.md")
+            recording.files.transcriptMarkdown = transcriptURL.path
             recording.durationSeconds = result.publication.durationSeconds
             if recording.captureEndedAt == nil {
                 recording.captureEndedAt = recording.effectiveStartedAt.addingTimeInterval(
@@ -231,6 +230,23 @@ public final class RecordingJobQueue {
             if let interruptionMessage {
                 recording.warnings.append("Recovered after interruption: \(interruptionMessage)")
             }
+            do {
+                switch try store.synchronizeTranscriptMetadata(for: recording) {
+                case .noFile:
+                    recording.warnings.append("Transcript.md metadata is unavailable.")
+                case .notOwned:
+                    recording.warnings.append(
+                        "Transcript.md was preserved because it belongs to another recording."
+                    )
+                case .unchanged, .updated:
+                    break
+                }
+            } catch {
+                recording.warnings.append(
+                    "Transcript.md metadata could not be updated: \(error.localizedDescription)"
+                )
+            }
+            recording.files.transcriptBookmark = try? store.bookmark(for: transcriptURL)
             try store.save(recording)
             do {
                 try store.removeCaptureArtifacts(for: recording)
@@ -286,6 +302,7 @@ public final class RecordingJobQueue {
                 recording.lastFailure = nil
             }
             try store.save(recording)
+            _ = try? store.synchronizeTranscriptMetadata(for: recording)
             return true
         }.value
     }
@@ -304,6 +321,7 @@ public final class RecordingJobQueue {
             )
             do {
                 try store.save(recording)
+                _ = try? store.synchronizeTranscriptMetadata(for: recording)
                 return true
             } catch {
                 return false
