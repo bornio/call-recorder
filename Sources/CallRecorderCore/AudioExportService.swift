@@ -322,7 +322,20 @@ public struct AudioExportService: Sendable {
                 value: "Call Recorder"
             ),
         ]
-        try await exporter.export(to: destinationURL, as: .m4a)
+        if #available(macOS 15.0, *) {
+            try await exporter.export(to: destinationURL, as: .m4a)
+        } else {
+            exporter.outputURL = destinationURL
+            exporter.outputFileType = .m4a
+            await withCheckedContinuation { continuation in
+                exporter.exportAsynchronously {
+                    continuation.resume()
+                }
+            }
+            guard exporter.status == .completed else {
+                throw exporter.error ?? AudioMetadataError.exportFailed
+            }
+        }
     }
 
     private func metadataItem(
@@ -384,8 +397,14 @@ public struct AudioExportService: Sendable {
 
 private enum AudioMetadataError: LocalizedError {
     case unavailableExporter
+    case exportFailed
 
     var errorDescription: String? {
-        "The native MPEG-4 metadata exporter is unavailable."
+        switch self {
+        case .unavailableExporter:
+            "The native MPEG-4 metadata exporter is unavailable."
+        case .exportFailed:
+            "The native MPEG-4 metadata export did not complete."
+        }
     }
 }
