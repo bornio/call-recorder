@@ -61,7 +61,7 @@ func expectThrows<T, ExpectedError: Error>(
 }
 
 @MainActor
-func expectThrows<T, ExpectedError: Error>(
+func expectThrows<T: Sendable, ExpectedError: Error>(
     _ expectedType: ExpectedError.Type,
     matching matches: (ExpectedError) -> Bool = { _ in true },
     _ body: () async throws -> T
