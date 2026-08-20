@@ -191,6 +191,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var keychainErrorMessage: String?
     @Published private(set) var storageErrorMessage: String?
     @Published private(set) var unseenTranscriptCompletionID: UUID?
+    @Published var selectedHistoryRecordingID: UUID?
+    @Published var historySearchText = ""
     @Published private(set) var isPreparingToTerminate = false
     @Published private(set) var calendarSuggestionsEnabled = false
     @Published private(set) var calendarAccessState: CalendarAccessState = .notDetermined
@@ -418,11 +420,22 @@ final class AppModel: ObservableObject {
             return recording
         }
         let candidates = recordings.filter { $0.id != activeCapture?.id }
-        if captureState == .ready,
-           let actionable = candidates.first(where: \.requiresAttention) {
+        if let actionable = candidates.first(where: \.requiresAttention) {
             return actionable
         }
-        return candidates.first
+        return candidates.first {
+            $0.captureStatus != .complete || $0.transcriptionStatus != .complete
+        }
+    }
+
+    var latestCompletedRecording: RecordingManifest? {
+        guard captureState == .ready, backgroundSummaryRecording == nil else { return nil }
+        return recordings.first {
+            $0.id != activeCapture?.id &&
+                $0.captureStatus == .complete &&
+                $0.transcriptionStatus == .complete &&
+                !$0.requiresAttention
+        }
     }
 
     var hasRecordingNeedingAttention: Bool {
@@ -1157,6 +1170,11 @@ final class AppModel: ObservableObject {
         if presented {
             acknowledgeTranscriptCompletion()
         }
+    }
+
+    func showRecordingInHistory(_ recordingID: UUID) {
+        historySearchText = ""
+        selectedHistoryRecordingID = recordingID
     }
 
     // MARK: Recording Detail Data

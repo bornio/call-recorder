@@ -4,8 +4,6 @@ import SwiftUI
 
 struct HistoryView: View {
     @EnvironmentObject private var model: AppModel
-    @State private var selectedRecordingID: UUID?
-    @State private var searchText = ""
     @State private var evaluatedSearchText = ""
     @State private var matchingRecordingIDs: Set<UUID> = []
     @State private var selectedTranscriptMatches: [TranscriptSearchMatch] = []
@@ -61,14 +59,14 @@ struct HistoryView: View {
 
     private var historyContent: some View {
         historyUpdateContent
-            .onChange(of: searchText) { _, newValue in
+            .onChange(of: model.historySearchText) { _, newValue in
                 selectedSearchMatchIndex = 0
                 if !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     selectedDetailSection = .transcript
                 }
                 scheduleSearchUpdate(debounced: true)
             }
-            .onChange(of: selectedRecordingID) { _, _ in
+            .onChange(of: model.selectedHistoryRecordingID) { _, _ in
                 selectedSearchMatchIndex = 0
                 scheduleSearchUpdate(debounced: false)
             }
@@ -88,8 +86,11 @@ struct HistoryView: View {
                 scheduleSearchUpdate(debounced: false)
             }
             .onChange(of: filteredRecordingIDs, initial: true) { _, ids in
-                if let selectedRecordingID, ids.contains(selectedRecordingID) { return }
-                self.selectedRecordingID = ids.first
+                if let selectedRecordingID = model.selectedHistoryRecordingID,
+                   ids.contains(selectedRecordingID) {
+                    return
+                }
+                model.selectedHistoryRecordingID = ids.first
             }
     }
 
@@ -132,7 +133,7 @@ struct HistoryView: View {
             }
         }
         .navigationTitle("Recordings")
-        .searchable(text: $searchText, prompt: "Search recordings")
+        .searchable(text: $model.historySearchText, prompt: "Search recordings")
         .onSubmit(of: .search) {
             if isUpdatingSearchResults {
                 scheduleSearchUpdate(debounced: false)
@@ -177,7 +178,7 @@ struct HistoryView: View {
         } else if filteredRecordings.isEmpty {
             searchEmptyState
         } else {
-            List(filteredRecordings, selection: $selectedRecordingID) { recording in
+            List(filteredRecordings, selection: $model.selectedHistoryRecordingID) { recording in
                 RecordingSidebarRow(
                     recording: recording,
                     recoveryBytes: model.recoveryBytes(for: recording)
@@ -216,7 +217,7 @@ struct HistoryView: View {
                 reuploadAction: { pendingReupload = recording }
             )
             .environmentObject(model)
-        } else if filteredRecordings.isEmpty, !searchText.isEmpty {
+        } else if filteredRecordings.isEmpty, !model.historySearchText.isEmpty {
             searchEmptyState
         } else {
             ContentUnavailableView(
@@ -281,7 +282,7 @@ struct HistoryView: View {
                 description: Text("Completed transcripts are still loading or unavailable. Results update automatically when they become searchable.")
             )
         } else {
-            ContentUnavailableView.search(text: searchText)
+            ContentUnavailableView.search(text: model.historySearchText)
         }
     }
 
@@ -295,12 +296,12 @@ struct HistoryView: View {
     }
 
     private var selectedRecording: RecordingManifest? {
-        guard let selectedRecordingID else { return nil }
+        guard let selectedRecordingID = model.selectedHistoryRecordingID else { return nil }
         return filteredRecordings.first { $0.id == selectedRecordingID }
     }
 
     private var normalizedSearchText: String {
-        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        model.historySearchText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var hasUnindexedTranscripts: Bool {
@@ -356,7 +357,7 @@ struct HistoryView: View {
                     document: model.transcriptDocument(for: recording)
                 )
             }
-            let selectedRecordingID = self.selectedRecordingID
+            let selectedRecordingID = model.selectedHistoryRecordingID
             let worker = Task.detached(priority: .userInitiated) {
                 () -> (Set<UUID>, [TranscriptSearchMatch])? in
                 var matchingIDs: Set<UUID> = []

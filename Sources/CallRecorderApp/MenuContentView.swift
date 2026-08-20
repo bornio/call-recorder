@@ -31,7 +31,13 @@ struct MenuContentView: View {
                             recording: recording,
                             captureIsActive: model.captureState != .ready,
                             activity: model.backgroundActivity,
-                            action: showRecordings
+                            action: { showRecording(recording) }
+                        )
+                    } else if let recording = model.latestCompletedRecording {
+                        Divider()
+                        LatestRecordingSummary(
+                            recording: recording,
+                            action: { showRecording(recording) }
                         )
                     }
                 }
@@ -108,6 +114,11 @@ struct MenuContentView: View {
     private func showRecordings() {
         openWindow(id: "recordings")
         NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    private func showRecording(_ recording: RecordingManifest) {
+        model.showRecordingInHistory(recording.id)
+        showRecordings()
     }
 
     private func showAbout() {

@@ -79,7 +79,7 @@ struct BackgroundRecordingSummary: View {
         if recording.transcriptionStatus == .waitingForCredential {
             return "Deepgram key needed"
         }
-        if recording.hasFailure {
+        if recording.hasFailure || recording.captureHealthSummary != nil {
             return "Recording needs attention"
         }
         if case .finishingAudio = activeActivity {
@@ -135,5 +135,38 @@ struct BackgroundRecordingSummary: View {
     private var activeActivity: RecordingJobActivity? {
         guard activity?.recordingID == recording.id else { return nil }
         return activity
+    }
+}
+
+struct LatestRecordingSummary: View {
+    let recording: RecordingManifest
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: "checkmark.circle")
+                    .foregroundStyle(.green)
+                    .frame(width: 16)
+                Text(conciseTitle)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.vertical, 3)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Latest recording. \(recording.displayTitle). Transcript ready")
+        .accessibilityHint("Opens this recording")
+    }
+
+    private var conciseTitle: String {
+        let title = recording.displayTitle
+        guard title.count > 30 else { return title }
+        return String(title.prefix(29)) + "…"
     }
 }
