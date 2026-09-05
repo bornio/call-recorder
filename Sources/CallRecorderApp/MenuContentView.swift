@@ -12,7 +12,7 @@ struct MenuContentView: View {
 
             Divider()
 
-            AdaptiveMenuScrollView(maximumHeight: 360) {
+            ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 14) {
                     if model.isPreparingToTerminate {
                         TerminationContent(model: model)
@@ -43,12 +43,39 @@ struct MenuContentView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .frame(height: 300)
+            .scrollBounceBehavior(.basedOnSize)
+
+            if model.captureState == .ready, !model.isPreparingToTerminate {
+                Button {
+                    model.startRecording()
+                } label: {
+                    Label(
+                        model.pendingRecordingCount > 0 ? "Start Next Recording" : "Start Recording",
+                        systemImage: "record.circle"
+                    )
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(!model.canStartRecording)
+
+                Text("Records all Mac audio and the selected microphone locally. After Stop, audio is sent to Deepgram for transcription.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             Divider()
             VStack(spacing: 8) {
-                Button(action: showRecordings) {
-                    Label("Recordings", systemImage: "tray.full")
-                        .frame(maxWidth: .infinity)
+                HStack {
+                    Button(action: showRecordings) {
+                        Label("Recordings", systemImage: "tray.full")
+                            .frame(maxWidth: .infinity)
+                    }
+                    SettingsLink {
+                        Label("Settings…", systemImage: "gearshape")
+                    }
                 }
                 .buttonStyle(.bordered)
 
@@ -271,7 +298,9 @@ private struct ReadyCaptureContent: View {
                 .accessibilityLabel("Recording title")
             }
 
-            LabeledContent("Microphone") {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Microphone")
+                    .foregroundStyle(.secondary)
                 Picker("Microphone", selection: $model.selectedMicrophoneUID) {
                     Text(model.automaticMicrophoneLabel)
                         .tag(AppModel.automaticMicrophoneUID)
@@ -281,7 +310,25 @@ private struct ReadyCaptureContent: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
-                .frame(maxWidth: 220, alignment: .trailing)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                if let microphone = model.selectedMicrophone {
+                    Text(microphone.name)
+                        .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Text("Saves to \(model.outputDirectory.path)")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .help(model.outputDirectory.path)
+
+            if let error = model.outputDirectoryErrorMessage {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.red)
             }
 
             LabeledContent("Language") {
@@ -319,23 +366,6 @@ private struct ReadyCaptureContent: View {
                 .foregroundStyle(.orange)
             }
 
-            Button {
-                model.startRecording()
-            } label: {
-                Label(
-                    model.pendingRecordingCount > 0 ? "Start Next Recording" : "Start Recording",
-                    systemImage: "record.circle"
-                )
-                .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(!model.canStartRecording)
-
-            Text("Click Start to begin recording.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .center)
         }
     }
 }

@@ -16,7 +16,7 @@ struct SettingsView: View {
                         "Recording, Calendar, and transcription-accuracy settings are locked until capture stops.",
                         systemImage: "lock.fill"
                     )
-                    .font(.caption)
+                    .font(.callout)
                     .foregroundStyle(.secondary)
                 }
             }
@@ -46,88 +46,34 @@ struct SettingsView: View {
                         .disabled(!model.canChangeCaptureConfiguration)
                         .onSubmit { model.normalizeLocalSpeakerName() }
                     Text("Type the name that should label your microphone channel.")
-                        .font(.caption)
+                        .font(.callout)
                         .foregroundStyle(.secondary)
                 }
 
-                LabeledContent("Save recordings to") {
+                VStack(alignment: .leading, spacing: 6) {
                     HStack {
-                        Text(model.outputDirectory.path)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .help(model.outputDirectory.path)
+                        Text("Save recordings to")
+                        Spacer()
                         Button("Choose…") { model.chooseOutputDirectory() }
                             .disabled(!model.canChangeCaptureConfiguration)
+                            .accessibilityLabel("Choose output folder")
                     }
+                    Text(model.outputDirectory.path)
+                        .font(.callout)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                        .help(model.outputDirectory.path)
                 }
                 Text("Each call is saved with Audio.m4a and Transcript.md. Recording details remain in the Markdown even if transcription fails.")
-                    .font(.caption)
+                    .font(.callout)
                     .foregroundStyle(.secondary)
                 if let error = model.outputDirectoryErrorMessage {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
+                        .font(.callout)
                         .foregroundStyle(.red)
                 }
             }
 
-            Section("Calendar") {
-                Toggle(
-                    "Use Calendar for meeting context",
-                    isOn: Binding(
-                        get: { model.calendarSuggestionsEnabled },
-                        set: { model.setCalendarSuggestionsEnabled($0) }
-                    )
-                )
-                .disabled(!model.canChangeCaptureConfiguration)
-
-                if model.calendarSuggestionsEnabled {
-                    calendarAccessContent
-                        .disabled(!model.canChangeCaptureConfiguration)
-                }
-
-                Text("Calendar data stays on this Mac. Call Recorder reads selected calendars to suggest a meeting title and may retain the matched meeting time and attendee names in private app history. It never starts a recording or changes an event.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("Transcription accuracy") {
-                Toggle(
-                    "Improve names and jargon (paid Deepgram add-on)",
-                    isOn: $model.keytermPromptingEnabled
-                )
-                .disabled(!model.canChangeCaptureConfiguration)
-
-                if model.keytermPromptingEnabled {
-                    Text("Enter one name, company, product, acronym, or phrase per line.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    TextField(
-                        "Key terms",
-                        text: $model.keytermsText,
-                        axis: .vertical
-                    )
-                    .lineLimit(3...6)
-                    .disabled(!model.canChangeCaptureConfiguration)
-
-                    if model.keytermsAreLimited {
-                        Label(
-                            "Only the first \(DeepgramKeyterms.maximumCount) terms will be used.",
-                            systemImage: "exclamationmark.triangle"
-                        )
-                        .foregroundStyle(.orange)
-                    } else if model.keytermCount == 0 {
-                        Text("Add at least one term to enable prompting.")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Text("\(model.keytermCount) of \(DeepgramKeyterms.maximumCount) terms")
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                Text("Terms are sent to Deepgram and billed separately only when this option is enabled.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
             Section("Deepgram") {
                 HStack {
                     Image(systemName: model.hasDeepgramKey ? "checkmark.circle.fill" : "circle")
@@ -156,13 +102,81 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 Text(credentialDetailText)
-                    .font(.caption)
+                    .font(.callout)
                     .foregroundStyle(.secondary)
                 if let error = model.keychainErrorMessage {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
+                        .font(.callout)
                         .foregroundStyle(.red)
                 }
+            }
+
+            Section("Permissions") {
+                Text("Start Recording to request Microphone and System Audio Recording access when macOS needs it. Review these permissions in System Settings if capture fails.")
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Button("Microphone Settings") { model.openMicrophonePrivacySettings() }
+                    Button("System Audio Settings") { model.openSystemAudioPrivacySettings() }
+                }
+            }
+
+            Section("Calendar") {
+                Toggle(
+                    "Use Calendar for meeting context",
+                    isOn: Binding(
+                        get: { model.calendarSuggestionsEnabled },
+                        set: { model.setCalendarSuggestionsEnabled($0) }
+                    )
+                )
+                .disabled(!model.canChangeCaptureConfiguration)
+
+                if model.calendarSuggestionsEnabled {
+                    calendarAccessContent
+                        .disabled(!model.canChangeCaptureConfiguration)
+                }
+
+                Text("Calendar data stays on this Mac. Call Recorder reads selected calendars to suggest a meeting title and may retain the matched meeting time and attendee names in private app history. It never starts a recording or changes an event.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Transcription accuracy") {
+                Toggle(
+                    "Improve names and jargon (paid Deepgram add-on)",
+                    isOn: $model.keytermPromptingEnabled
+                )
+                .disabled(!model.canChangeCaptureConfiguration)
+
+                if model.keytermPromptingEnabled {
+                    Text("Enter one name, company, product, acronym, or phrase per line.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    TextField(
+                        "Key terms",
+                        text: $model.keytermsText,
+                        axis: .vertical
+                    )
+                    .lineLimit(3...6)
+                    .disabled(!model.canChangeCaptureConfiguration)
+
+                    if model.keytermsAreLimited {
+                        Label(
+                            "Only the first \(DeepgramKeyterms.maximumCount) terms will be used.",
+                            systemImage: "exclamationmark.triangle"
+                        )
+                        .foregroundStyle(.orange)
+                    } else if model.keytermCount == 0 {
+                        Text("Add at least one term to enable prompting.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("\(model.keytermCount) of \(DeepgramKeyterms.maximumCount) terms")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Text("Terms are sent to Deepgram and billed separately only when this option is enabled.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Storage") {
@@ -175,7 +189,7 @@ struct SettingsView: View {
                         .monospacedDigit()
                 }
                 Text("Private history includes saved Deepgram responses used to recreate transcripts without another paid upload. Recovery data is temporary audio retained after an interruption or failed save.")
-                    .font(.caption)
+                    .font(.callout)
                     .foregroundStyle(.secondary)
                 ViewThatFits(in: .horizontal) {
                     HStack {
@@ -205,23 +219,14 @@ struct SettingsView: View {
                     .disabled(!model.canForgetHistory)
                     if let reason = model.forgetHistoryUnavailableReason {
                         Text(reason)
-                            .font(.caption)
+                            .font(.callout)
                             .foregroundStyle(.secondary)
                     }
                 }
                 if let error = model.storageErrorMessage {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
+                        .font(.callout)
                         .foregroundStyle(.red)
-                }
-            }
-
-            Section("Permissions") {
-                Text("macOS asks for Microphone and System Audio Recording access the first time recording starts.")
-                    .foregroundStyle(.secondary)
-                HStack {
-                    Button("Microphone Settings") { model.openMicrophonePrivacySettings() }
-                    Button("System Audio Settings") { model.openSystemAudioPrivacySettings() }
                 }
             }
 
@@ -286,7 +291,7 @@ struct SettingsView: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(calendar.title)
                                 Text(calendar.sourceTitle)
-                                    .font(.caption)
+                                    .font(.callout)
                                     .foregroundStyle(.secondary)
                             }
                         }
@@ -336,7 +341,7 @@ struct SettingsView: View {
 
         if let error = model.calendarErrorMessage {
             Label(error, systemImage: "exclamationmark.triangle.fill")
-                .font(.caption)
+                .font(.callout)
                 .foregroundStyle(.red)
         }
     }

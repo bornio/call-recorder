@@ -3,12 +3,11 @@ import CallRecorderCore
 import SwiftUI
 
 struct MenuBarLabelView: View {
+    let appDelegate: AppDelegate
     @EnvironmentObject private var model: AppModel
-    #if CALL_RECORDER_KEYCHAIN_FREE_DEV
     @Environment(\.openSettings) private var openSettings
     @Environment(\.openWindow) private var openWindow
-    @State private var didOpenDevelopmentWindow = false
-    #endif
+    @State private var didOpenLaunchWindow = false
 
     var body: some View {
         HStack(spacing: 4) {
@@ -20,18 +19,24 @@ struct MenuBarLabelView: View {
         }
         .accessibilityLabel(accessibilityLabel)
         .task {
+            appDelegate.showRecorder = {
+                openWindow(id: "recorder")
+                NSApplication.shared.activate(ignoringOtherApps: true)
+            }
+            guard !didOpenLaunchWindow else { return }
+            didOpenLaunchWindow = true
             #if CALL_RECORDER_KEYCHAIN_FREE_DEV
-            guard !didOpenDevelopmentWindow else { return }
             let arguments = ProcessInfo.processInfo.arguments
             if arguments.contains("--open-recordings") {
-                didOpenDevelopmentWindow = true
                 openWindow(id: "recordings")
                 NSApplication.shared.activate(ignoringOtherApps: true)
+                return
             } else if arguments.contains("--open-settings") {
-                didOpenDevelopmentWindow = true
                 openSettings()
+                return
             }
             #endif
+            appDelegate.showRecorder?()
         }
     }
 

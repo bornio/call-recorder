@@ -4,6 +4,12 @@ import SwiftUI
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var activationPolicyUpdateScheduled = false
+    var showRecorder: (() -> Void)?
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showRecorder?()
+        return false
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
@@ -127,10 +133,19 @@ struct CallRecorderApplication: App {
             MenuContentView()
                 .environmentObject(model)
         } label: {
-            MenuBarLabelView()
+            MenuBarLabelView(appDelegate: appDelegate)
                 .environmentObject(model)
         }
         .menuBarExtraStyle(.window)
+
+        Window("Recorder", id: "recorder") {
+            MenuContentView()
+                .environmentObject(model)
+        }
+        .windowResizability(.contentSize)
+        .commands {
+            RecorderCommands(model: model)
+        }
 
         Window("Recordings", id: "recordings") {
             HistoryView()
@@ -147,6 +162,31 @@ struct CallRecorderApplication: App {
                 .environmentObject(model)
                 .frame(width: 520)
                 .frame(minHeight: 520, idealHeight: 700)
+        }
+    }
+}
+
+private struct RecorderCommands: Commands {
+    @ObservedObject var model: AppModel
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some Commands {
+        CommandGroup(after: .newItem) {
+            Button("Show Recorder") {
+                openWindow(id: "recorder")
+                NSApplication.shared.activate(ignoringOtherApps: true)
+            }
+            .keyboardShortcut("r", modifiers: [.command, .shift])
+
+            Button("Show Recordings") {
+                openWindow(id: "recordings")
+                NSApplication.shared.activate(ignoringOtherApps: true)
+            }
+            .keyboardShortcut("l", modifiers: [.command, .shift])
+
+            Button("Transcribe Audio…") { model.chooseAudioForTranscription() }
+                .keyboardShortcut("o")
+                .disabled(!model.canImportAudio)
         }
     }
 }

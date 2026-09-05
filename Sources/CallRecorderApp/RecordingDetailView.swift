@@ -17,6 +17,7 @@ struct RecordingDetailView: View {
     @State private var titleSaveErrorMessage: String?
     @State private var renameTarget: SpeakerRenameTarget?
     @State private var speakerNameDraft = ""
+    @StateObject private var audioPlayer = RecordingAudioPlayerModel()
     @FocusState private var titleIsFocused: Bool
 
     var body: some View {
@@ -29,7 +30,7 @@ struct RecordingDetailView: View {
             Divider()
 
             if let audioURL = model.resolvedAudioURL(for: recording) {
-                RecordingAudioPlayer(url: audioURL, origin: recording.effectiveOrigin)
+                RecordingAudioPlayer(player: audioPlayer, url: audioURL, origin: recording.effectiveOrigin)
                     .id(audioURL)
                     .padding(.horizontal, 28)
                     .padding(.vertical, 14)
@@ -100,7 +101,7 @@ struct RecordingDetailView: View {
             }
             Button("Cancel", role: .cancel) { renameTarget = nil }
         } message: {
-            Text("This changes the speaker label in Call Recorder. Existing Finder files are left untouched.")
+            Text("Saving updates this speaker’s name in Call Recorder and the Markdown transcript. Files edited outside the app are preserved; use Export Transcript… to save a corrected copy.")
         }
     }
 
@@ -230,7 +231,9 @@ struct RecordingDetailView: View {
                                     activeMatch: activeSearchMatch?.segmentIndex == index
                                         ? activeSearchMatch
                                         : nil,
-                                    renameAction: beginRename
+                                    renameAction: beginRename,
+                                    seekAction: { audioPlayer.seek(to: segment.start) },
+                                    canSeek: !audioPlayer.isLoading && audioPlayer.errorMessage == nil
                                 )
                                 .id(index)
                                 Divider()
@@ -341,6 +344,19 @@ struct RecordingDetailView: View {
         HStack(spacing: 10) {
             primaryFooterAction
 
+            if model.transcriptDocument(for: recording) != nil {
+                Button {
+                    model.exportTranscript(in: recording)
+                } label: {
+                    responsiveActionLabel(
+                        title: "Export Transcript…",
+                        compactTitle: "Export…",
+                        systemImage: "square.and.arrow.up"
+                    )
+                }
+                .help("Save a Markdown copy with the current speaker labels")
+            }
+
             Spacer()
 
             Menu {
@@ -433,7 +449,7 @@ struct RecordingDetailView: View {
                     systemImage: "doc.on.doc"
                 )
             }
-            .help("Copy transcript")
+            .help("Copy with current speaker labels. Edits made in Finder are not included.")
         }
     }
 
@@ -627,6 +643,8 @@ private struct TranscriptSegmentRow: View {
     let searchText: String
     let activeMatch: TranscriptSearchMatch?
     let renameAction: (TranscriptSegment) -> Void
+    let seekAction: () -> Void
+    let canSeek: Bool
 
     var body: some View {
         HStack(alignment: .top, spacing: 16) {
@@ -661,9 +679,16 @@ private struct TranscriptSegmentRow: View {
                         .foregroundStyle(speakerColor)
                 }
 
-                Text(segmentTimestamp(segment.start))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                Button(action: seekAction) {
+                    Text(segmentTimestamp(segment.start))
+                        .font(.callout.monospacedDigit())
+                        .underline()
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.tint)
+                .disabled(!canSeek)
+                .help("Seek to \(segmentTimestamp(segment.start))")
+                .accessibilityLabel("Seek to \(segmentTimestamp(segment.start))")
             }
             .frame(width: 120, alignment: .leading)
 

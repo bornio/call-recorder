@@ -777,6 +777,56 @@ func runRecordingStoreTests() throws {
             try expectEqual(secondFingerprint.byteCount, Int64(second.count))
         }
     }
+
+    try runTest("sharing uses speaker corrections without changing source transcripts") {
+        try withTemporaryDirectory { root in
+            let store = RecordingStore(rootDirectory: root.appendingPathComponent("history"))
+            var recording = try store.createRecording(
+                language: .english,
+                microphoneUID: "mic",
+                microphoneName: "Mic"
+            )
+            let response = Data(#"{"results":{"channels":[],"utterances":[{"start":12.5,"end":15.75,"channel":0,"speaker":2,"transcript":"Keep these exact words.","confidence":0.99}]}}"#.utf8)
+            let responseURL = try store.directory(for: recording).appendingPathComponent("transcript.json")
+            try response.write(to: responseURL)
+            let originalURL = root.appendingPathComponent("Transcript.md")
+            let original = "User-edited transcript. Do not replace.\n"
+            try original.write(to: originalURL, atomically: true, encoding: .utf8)
+            recording.files.transcriptMarkdown = originalURL.path
+            let documentBefore = try store.transcriptDocument(for: recording)
+            let previous = recording
+            recording.setSpeakerName("Morgan", channel: 0, speaker: 2)
+
+            let shared = try require(try store.transcriptMarkdownForSharing(for: recording))
+
+            try expect(shared.contains("[00:00:12.500] **Morgan:** Keep these exact words."))
+            try expect(!shared.contains("**Speaker 2:**"))
+            try expectEqual(try String(contentsOf: originalURL, encoding: .utf8), original)
+            try expectEqual(try Data(contentsOf: responseURL), response)
+            try expectEqual(try store.transcriptDocument(for: recording), documentBefore)
+            try expectEqual(try store.synchronizeTranscriptSpeakerLabels(from: previous, to: recording), false)
+            try expectEqual(try String(contentsOf: originalURL, encoding: .utf8), original)
+
+            let generated = TranscriptMarkdownFormatter.format(
+                document: try require(documentBefore),
+                recording: previous
+            )
+            try generated.write(to: originalURL, atomically: true, encoding: .utf8)
+            try expectEqual(try store.synchronizeTranscriptSpeakerLabels(from: previous, to: recording), true)
+            try expectEqual(try String(contentsOf: originalURL, encoding: .utf8), shared)
+
+            var renamedAgain = recording
+            renamedAgain.setSpeakerName("Jordan", channel: 0, speaker: 2)
+            try expectEqual(try store.synchronizeTranscriptSpeakerLabels(from: recording, to: renamedAgain), true)
+            let latest = try String(contentsOf: originalURL, encoding: .utf8)
+            try expect(latest.contains("[00:00:12.500] **Jordan:** Keep these exact words."))
+            try expectEqual(try Data(contentsOf: responseURL), response)
+
+            try store.removeRetainedTranscriptResponse(for: recording)
+            try expectEqual(try store.transcriptMarkdownForSharing(for: recording), latest)
+            try expectEqual(try store.synchronizeTranscriptSpeakerLabels(from: recording, to: renamedAgain), false)
+        }
+    }
 }
 
 private func writeClosedCaptureMetadata(

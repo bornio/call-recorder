@@ -418,6 +418,37 @@ public struct RecordingStore: Sendable {
         return try TranscriptDocument(deepgramResponse: data)
     }
 
+    public func transcriptMarkdownForSharing(for manifest: RecordingManifest) throws -> String? {
+        if let document = try transcriptDocument(for: manifest) {
+            return TranscriptMarkdownFormatter.format(document: document, recording: manifest)
+        }
+        guard let url = try transcriptURL(for: manifest) else { return nil }
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    /// Updates an app-generated transcript without replacing edits made outside the app.
+    @discardableResult
+    public func synchronizeTranscriptSpeakerLabels(
+        from previous: RecordingManifest,
+        to recording: RecordingManifest
+    ) throws -> Bool {
+        guard let url = try transcriptURL(for: recording),
+              let document = try transcriptDocument(for: recording)
+        else { return false }
+        let existing = try Data(contentsOf: url)
+        let expected = Data(
+            TranscriptMarkdownFormatter.format(document: document, recording: previous).utf8
+        )
+        guard existing == expected else { return false }
+        let updated = Data(
+            TranscriptMarkdownFormatter.format(document: document, recording: recording).utf8
+        )
+        if updated != existing {
+            try AtomicFilePublisher.replaceFile(updated, at: url)
+        }
+        return true
+    }
+
     public func expectsRetainedTranscriptResponse(for manifest: RecordingManifest) -> Bool {
         if manifest.files.transcriptJSON != nil { return true }
         guard let directory = try? directory(for: manifest) else { return false }

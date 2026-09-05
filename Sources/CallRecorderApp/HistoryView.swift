@@ -3,6 +3,7 @@ import Foundation
 import SwiftUI
 
 struct HistoryView: View {
+    @Environment(\.openWindow) private var openWindow
     @EnvironmentObject private var model: AppModel
     @State private var evaluatedSearchText = ""
     @State private var matchingRecordingIDs: Set<UUID> = []
@@ -217,6 +218,7 @@ struct HistoryView: View {
                 reuploadAction: { pendingReupload = recording }
             )
             .environmentObject(model)
+            .id(recording.id)
         } else if filteredRecordings.isEmpty, !model.historySearchText.isEmpty {
             searchEmptyState
         } else {
@@ -231,6 +233,11 @@ struct HistoryView: View {
     @ToolbarContentBuilder
     private var historyToolbar: some ToolbarContent {
         ToolbarItemGroup {
+            Button("Show Recorder", systemImage: "record.circle") {
+                openWindow(id: "recorder")
+            }
+            .help("Show Recorder (⇧⌘R)")
+
             Button {
                 model.refreshHistoryFromFinder()
             } label: {
@@ -256,10 +263,15 @@ struct HistoryView: View {
                     }
                 } else {
                     Label("Transcribe Audio…", systemImage: "waveform.badge.plus")
+                        .labelStyle(.titleAndIcon)
                 }
             }
             .disabled(!model.canImportAudio)
             .help(model.importUnavailableReason ?? "Transcribe an audio file")
+
+            SettingsLink {
+                Label("Settings…", systemImage: "gearshape")
+            }
         }
     }
 

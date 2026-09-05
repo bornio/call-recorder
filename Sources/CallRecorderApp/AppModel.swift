@@ -242,7 +242,8 @@ final class AppModel: ObservableObject {
     private var forgetHistoryTask: Task<Void, Never>?
     private var storageRefreshTask: Task<Void, Never>?
     private var fatalStopRequested = false
-    private var isMenuPresented = false
+    private var presentedRecorderCount = 0
+    private var isMenuPresented: Bool { presentedRecorderCount > 0 }
     private var isHistoryPresented = false
     private var terminationCompletion: (@MainActor () -> Void)?
     @Published private var recoverableCaptureIDs: Set<UUID> = []
@@ -1156,7 +1157,8 @@ final class AppModel: ObservableObject {
     // MARK: Presentation Lifecycle
 
     func setMenuPresented(_ presented: Bool) {
-        isMenuPresented = presented
+        // The menu popover and Recorder window can both be visible.
+        presentedRecorderCount += presented ? 1 : -1
         if presented {
             acknowledgeTranscriptCompletion()
         }
@@ -1314,12 +1316,21 @@ final class AppModel: ObservableObject {
         to name: String
     ) {
         guard canEditMetadata(for: original),
-              !(original.effectiveOrigin == .nativeRecording && channel == 1),
-              var recording = try? store.load(id: original.id)
+              !(original.effectiveOrigin == .nativeRecording && channel == 1)
         else { return }
-        recording.setSpeakerName(name, channel: channel, speaker: speaker)
         do {
+            let previous = try store.load(id: original.id)
+            var recording = previous
+            recording.setSpeakerName(name, channel: channel, speaker: speaker)
             try store.save(recording)
+            do {
+                if try !store.synchronizeTranscriptSpeakerLabels(from: previous, to: recording) {
+                    historyErrorMessage = "Speaker name saved in Call Recorder. The Markdown could not be updated automatically because it is unavailable or no longer matches the saved transcript. Use Export Transcript… to save a corrected copy."
+                }
+            } catch {
+                historyErrorMessage = "Speaker name saved in Call Recorder, but the Markdown could not be updated: "
+                    + error.localizedDescription
+            }
             reloadHistory()
         } catch {
             historyErrorMessage = error.localizedDescription
@@ -1358,10 +1369,29 @@ final class AppModel: ObservableObject {
 
     func copyTranscript(in recording: RecordingManifest) {
         do {
-            guard let url = try store.transcriptURL(for: recording) else { return }
-            let transcript = try String(contentsOf: url, encoding: .utf8)
+            let current = try store.load(id: recording.id)
+            guard let transcript = try store.transcriptMarkdownForSharing(for: current) else { return }
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(transcript, forType: .string)
+        } catch {
+            historyErrorMessage = error.localizedDescription
+        }
+    }
+
+    func exportTranscript(in recording: RecordingManifest) {
+        do {
+            let current = try store.load(id: recording.id)
+            guard let transcript = try store.transcriptMarkdownForSharing(for: current) else { return }
+            let originalURL = try store.transcriptURL(for: current)
+            let panel = NSSavePanel()
+            panel.title = "Export Transcript"
+            panel.message = "Save a Markdown copy with the speaker labels shown in Call Recorder. Edits made to the original in Finder are not included."
+            panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
+            panel.directoryURL = originalURL?.deletingLastPathComponent()
+            panel.nameFieldStringValue = (originalURL?.deletingPathExtension().lastPathComponent ?? "Transcript")
+                + " - Corrected.md"
+            guard panel.runModal() == .OK, let destination = panel.url else { return }
+            try transcript.write(to: destination, atomically: true, encoding: .utf8)
         } catch {
             historyErrorMessage = error.localizedDescription
         }

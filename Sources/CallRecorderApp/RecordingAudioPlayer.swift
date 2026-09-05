@@ -76,24 +76,20 @@ private actor RecordingAudioPlayerEngine {
 }
 
 @MainActor
-private final class RecordingAudioPlayerModel: ObservableObject {
+final class RecordingAudioPlayerModel: ObservableObject {
     @Published private(set) var currentTime: TimeInterval = 0
     @Published private(set) var duration: TimeInterval = 0
     @Published private(set) var isPlaying = false
     @Published private(set) var isLoading = true
     @Published private(set) var errorMessage: String?
 
-    private let url: URL
     private let engine = RecordingAudioPlayerEngine()
     private var isLoaded = false
+    private var loadedURL: URL?
     private var loadID = 0
     private var commandTask: Task<Void, Never>?
     private var panTask: Task<Void, Never>?
     private var monitorTask: Task<Void, Never>?
-
-    init(url: URL) {
-        self.url = url
-    }
 
     deinit {
         commandTask?.cancel()
@@ -101,7 +97,12 @@ private final class RecordingAudioPlayerModel: ObservableObject {
         monitorTask?.cancel()
     }
 
-    func load() async {
+    func load(url: URL) async {
+        if loadedURL != url {
+            suspend()
+            isLoaded = false
+            loadedURL = url
+        }
         guard !isLoaded, !isLoading || loadID == 0 else { return }
 
         loadID += 1
@@ -223,14 +224,10 @@ private enum PlaybackChannel: String, CaseIterable, Identifiable {
 }
 
 struct RecordingAudioPlayer: View {
-    @StateObject private var player: RecordingAudioPlayerModel
+    @ObservedObject var player: RecordingAudioPlayerModel
     @State private var channel: PlaybackChannel = .both
+    let url: URL
     let origin: RecordingOrigin
-
-    init(url: URL, origin: RecordingOrigin) {
-        _player = StateObject(wrappedValue: RecordingAudioPlayerModel(url: url))
-        self.origin = origin
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -294,7 +291,7 @@ struct RecordingAudioPlayer: View {
                 }
             }
         }
-        .task { await player.load() }
+        .task { await player.load(url: url) }
         .onDisappear { player.suspend() }
     }
 }

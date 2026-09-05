@@ -11,6 +11,8 @@ Download an Apple silicon DMG from
 [GitHub Releases](https://github.com/bornio/call-recorder/releases), open it,
 and drag Call Recorder to Applications.
 
+See the [changelog](CHANGELOG.md) for what's new.
+
 Release builds are ad-hoc signed rather than Apple-notarized. The first time you
 open one, macOS may require **System Settings → Privacy & Security → Open
 Anyway**. No Terminal commands are required.
@@ -68,19 +70,43 @@ Debug builds never read or write macOS Keychain. They use `DEEPGRAM_API_KEY`
 from the app process environment when live transcription is needed; without it,
 recording, Calendar, history, playback, and transcript UI can still be tested,
 while uploads wait for a credential. Release builds retain the normal Keychain
-behavior. UI automation can open either debug window directly with:
+behavior. Opening the app shows the Recorder window. Opening it again after
+closing every window brings Recorder back; closing windows leaves the menu-bar
+app running. Use the exact workspace app path when an installed copy shares its
+bundle identifier:
+
+```sh
+open "$PWD/.build/Call Recorder.app"
+```
+
+From any app window, **File → Show Recorder** (⇧⌘R) opens recording controls,
+**Show Recordings** (⇧⌘L) opens history, **Settings…** (⌘,) opens setup, and
+**Transcribe Audio…** (⌘O) opens the file picker. None starts recording.
+On a fresh debug launch, the existing window flags are also available:
 
 ```sh
 open -n ".build/Call Recorder.app" --args --open-settings
 open -n ".build/Call Recorder.app" --args --open-recordings
 ```
 
+In Recordings, click a transcript timestamp to seek without changing whether
+audio is playing or paused. Saving a speaker rename updates the in-app labels,
+**Copy Transcript**, and the saved Markdown when it still matches the
+app-generated transcript. If the Markdown has other changes or is unavailable,
+the app preserves it and explains how to export a corrected copy.
+**Export Transcript…** saves a Markdown copy with the current labels,
+defaulting to a separate `- Corrected.md` filename beside the original. Copy and
+export use the retained transcript, so edits made to Markdown in Finder are not
+included. Export defaults to keeping the original file unless you explicitly
+choose to replace it in the Save panel. Speaker corrections never change the
+Deepgram response, transcript wording, segmentation, or timestamps.
+
 ## First use
 
 Record only when you have the consent required from every participant and when
 recording is legal in your jurisdiction.
 
-1. Click the waveform icon in the menu bar and open **Settings**.
+1. Open Call Recorder and choose **Settings…** in the Recorder window.
 2. Create a Deepgram account, copy an API key, and save it in Settings. The key
    is stored in macOS Keychain and is never displayed again or written to a
    recording.
