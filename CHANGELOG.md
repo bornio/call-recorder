@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.1 — 2026-09-06
+
+Call Recorder 0.6.1 improves transcript search and imported-audio history.
+
+- Transcript search matches accented text consistently in the recordings list and transcript highlights, including searches such as “cafe” for “café”.
+- Improved reliability when adding existing audio to history.
+- Recording durations now use consistent `m:ss` / `h:mm:ss` formatting throughout the app.
+
+For Apple silicon Macs running macOS 14.2 or later. This build is not notarized; on first launch, macOS may require **System Settings → Privacy & Security → Open Anyway**.
+
+[Full diff from 0.6.0](https://github.com/bornio/call-recorder/compare/v0.6.0...v0.6.1)
+
 ## 0.6.0 — 2026-09-06
 
 Call Recorder 0.6.0 keeps audio and transcript review in sync while letting you read at your own pace.
