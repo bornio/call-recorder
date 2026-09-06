@@ -11,16 +11,7 @@ public struct RecordingPostProcessingResult: Sendable {
 }
 
 public struct RecordingPostProcessor: Sendable {
-    private let finalizer: RecordingFinalizer
-    private let audioExportService: AudioExportService
-
-    public init(
-        finalizer: RecordingFinalizer = RecordingFinalizer(),
-        audioExportService: AudioExportService = AudioExportService()
-    ) {
-        self.finalizer = finalizer
-        self.audioExportService = audioExportService
-    }
+    public init() {}
 
     public func process(
         recording: RecordingManifest,
@@ -33,7 +24,7 @@ public struct RecordingPostProcessor: Sendable {
         let publishedAudio = destinationDirectory.appendingPathComponent("Audio.m4a")
         if FileManager.default.fileExists(atPath: publishedAudio.path) {
             return RecordingPostProcessingResult(
-                publication: try audioExportService.recoverPublication(
+                publication: try AudioExportService().recoverPublication(
                     in: destinationDirectory,
                     recordingID: recording.id
                 ),
@@ -51,13 +42,13 @@ public struct RecordingPostProcessor: Sendable {
             in: recording
         )
         let waveURL = recordingDirectory.appendingPathComponent("audio.wav")
-        let finalization = try finalizer.finalize(
+        let finalization = try RecordingFinalizer().finalize(
             recordingDirectory: recordingDirectory,
             systemCaptureDirectory: systemDirectory,
             microphoneCaptureDirectory: microphoneDirectory,
             outputURL: waveURL
         )
-        let publication = try await audioExportService.publish(
+        let publication = try await AudioExportService().publish(
             waveURL: waveURL,
             recording: recording,
             exportRoot: destinationDirectory.deletingLastPathComponent(),

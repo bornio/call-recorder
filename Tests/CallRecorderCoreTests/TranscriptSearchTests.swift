@@ -28,9 +28,9 @@ func runTranscriptSearchTests() throws {
         )
 
         try expectEqual(matches, [
-            TranscriptSearchMatch(segmentIndex: 0, field: .text, occurrenceIndex: 0),
-            TranscriptSearchMatch(segmentIndex: 0, field: .text, occurrenceIndex: 1),
-            TranscriptSearchMatch(segmentIndex: 1, field: .speaker, occurrenceIndex: 0),
+            TranscriptSearchMatch(segmentIndex: 0, field: .text, range: NSRange(location: 0, length: 5)),
+            TranscriptSearchMatch(segmentIndex: 0, field: .text, range: NSRange(location: 11, length: 5)),
+            TranscriptSearchMatch(segmentIndex: 1, field: .speaker, range: NSRange(location: 0, length: 5)),
         ])
     }
 
@@ -41,7 +41,7 @@ func runTranscriptSearchTests() throws {
                 end: 4,
                 channel: 0,
                 speaker: 0,
-                text: "Cafe and CAFÉ"
+                text: "😀 Cafe and CAFE\u{301}"
             ),
         ])
 
@@ -52,9 +52,25 @@ func runTranscriptSearchTests() throws {
         )
 
         try expectEqual(matches, [
-            TranscriptSearchMatch(segmentIndex: 0, field: .text, occurrenceIndex: 0),
-            TranscriptSearchMatch(segmentIndex: 0, field: .text, occurrenceIndex: 1),
+            TranscriptSearchMatch(segmentIndex: 0, field: .text, range: NSRange(location: 3, length: 4)),
+            TranscriptSearchMatch(segmentIndex: 0, field: .text, range: NSRange(location: 12, length: 5)),
         ])
+    }
+
+    try runTest("search filtering agrees with Unicode match ranges and speaker edits") {
+        let document = TranscriptDocument(segments: [
+            TranscriptSegment(start: 0, end: 1, channel: 0, speaker: 0, text: "İ café"),
+        ])
+        for query in ["i", "cafe"] {
+            let matches = TranscriptSearchMatch.find(in: document, query: query) { _ in "Speaker" }
+            try expect(TranscriptSearchMatch.contains(query, in: document.segments[0].text))
+            try expectEqual(matches.count, 1)
+        }
+        let original = TranscriptSearchMatch.find(in: document, query: "cafe") { _ in "Café" }
+        let renamed = TranscriptSearchMatch.find(in: document, query: "cafe") { _ in "😀 Café" }
+        try expectEqual(original[0].range, NSRange(location: 0, length: 4))
+        try expectEqual(renamed[0].range, NSRange(location: 3, length: 4))
+        try expectEqual(original[1], renamed[1])
     }
 
     try runTest("transcript search ignores an empty query") {

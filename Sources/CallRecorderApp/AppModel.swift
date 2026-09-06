@@ -167,7 +167,7 @@ final class AppModel: ObservableObject {
     static weak var shared: AppModel?
     static let automaticMicrophoneUID = "__automatic_microphone__"
 
-    @Published private(set) var captureState: CaptureSessionState = .ready
+    var captureState: CaptureSessionState { captureStateMachine.state }
     @Published private(set) var backgroundActivity: RecordingJobActivity?
     @Published private(set) var recordings: [RecordingManifest] = []
     @Published private(set) var transcriptDocuments: [UUID: TranscriptDocument] = [:]
@@ -227,7 +227,7 @@ final class AppModel: ObservableObject {
 
     // MARK: Internal State and Services
 
-    private var captureStateMachine = CaptureSessionStateMachine()
+    @Published private var captureStateMachine = CaptureSessionStateMachine()
     private var captureEngine: CaptureEngine?
     private var activeCapture: RecordingManifest?
     private var recordingStartedAt: Date?
@@ -316,20 +316,9 @@ final class AppModel: ObservableObject {
         captureState == .ready
     }
 
-    var canImportAudio: Bool {
-        !isPreparingToTerminate &&
-            !hasPendingHistoryWork &&
-            captureState == .ready
-    }
+    var canImportAudio: Bool { importUnavailableReason == nil }
 
-    var canRefreshHistory: Bool {
-        !isPreparingToTerminate &&
-            !hasPendingHistoryWork &&
-            !isPerformingStartupCleanup &&
-            captureState == .ready &&
-            backgroundActivity == nil &&
-            pendingRecordingCount == 0
-    }
+    var canRefreshHistory: Bool { historyRefreshUnavailableReason == nil }
 
     var historyRefreshUnavailableReason: String? {
         if isRefreshingHistory || historyRefreshTask != nil {
@@ -371,16 +360,7 @@ final class AppModel: ObservableObject {
         return nil
     }
 
-    var canForgetHistory: Bool {
-        !isPreparingToTerminate &&
-            captureState == .ready &&
-            backgroundActivity == nil &&
-            !hasPendingHistoryWork &&
-            !isRefreshingStorage &&
-            !isPerformingStartupCleanup &&
-            storageUsage.privateHistoryBytes > 0 &&
-            pendingRecordingCount == 0
-    }
+    var canForgetHistory: Bool { forgetHistoryUnavailableReason == nil }
 
     var forgetHistoryUnavailableReason: String? {
         if isForgettingHistory || forgetHistoryTask != nil {
@@ -676,11 +656,11 @@ final class AppModel: ObservableObject {
         )
     }
 
-    func refreshCalendarContextIfStale(maxAge: TimeInterval = 60) {
+    func refreshCalendarContextIfStale() {
         guard calendarSuggestionsEnabled,
               canChangeCaptureConfiguration,
               calendarRefreshTask == nil,
-              calendarContextRefreshedAt.map({ Date().timeIntervalSince($0) >= maxAge }) ?? true
+              calendarContextRefreshedAt.map({ Date().timeIntervalSince($0) >= 60 }) ?? true
         else { return }
         scheduleCalendarContextRefresh(
             requestAccess: false,
@@ -1095,18 +1075,14 @@ final class AppModel: ObservableObject {
     func pauseRecording() {
         guard captureState == .recording, !isCancelling, let captureEngine else { return }
         do {
+            var nextState = captureStateMachine
+            try nextState.transition(.pause)
             try captureEngine.setPaused(true)
-            do {
-                try captureStateMachine.transition(.pause)
-            } catch {
-                try? captureEngine.setPaused(false)
-                throw error
-            }
             let now = Date()
             elapsedSeconds = floor(activeElapsed(at: now))
             pausedAt = now
             captureStatistics = captureEngine.statistics()
-            captureState = captureStateMachine.state
+            captureStateMachine = nextState
             captureIssue = nil
         } catch {
             captureIssue = CaptureIssue(
@@ -1118,19 +1094,15 @@ final class AppModel: ObservableObject {
     func resumeRecording() {
         guard captureState == .paused, !isCancelling, let captureEngine else { return }
         do {
+            var nextState = captureStateMachine
+            try nextState.transition(.resume)
             try captureEngine.setPaused(false)
-            do {
-                try captureStateMachine.transition(.resume)
-            } catch {
-                try? captureEngine.setPaused(true)
-                throw error
-            }
             let now = Date()
             if let pausedAt {
                 accumulatedPausedSeconds += now.timeIntervalSince(pausedAt)
             }
             self.pausedAt = nil
-            captureState = captureStateMachine.state
+            captureStateMachine = nextState
             captureIssue = nil
         } catch {
             captureIssue = CaptureIssue(
@@ -1282,7 +1254,7 @@ final class AppModel: ObservableObject {
         guard canEditMetadata(for: original),
               var recording = try? store.load(id: original.id)
         else { return }
-        recording.clearMeetingAssociation(keepCandidates: false)
+        recording.clearMeetingAssociation()
         do {
             try store.save(recording)
             synchronizePortableMetadata(for: recording)
@@ -1292,21 +1264,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    @discardableResult
-    func renameRecording(_ original: RecordingManifest, to title: String) -> Bool {
-        guard canEditMetadata(for: original) else { return false }
-        do {
-            var recording = try store.load(id: original.id)
-            recording.title = RecordingManifest.normalizedTitle(title)
-            recording.titleSource = recording.title == nil ? nil : .user
-            try store.save(recording)
-            synchronizePortableMetadata(for: recording)
-            reloadHistory()
-            return true
-        } catch {
-            historyErrorMessage = error.localizedDescription
-            return false
-        }
+    func renameRecording(_ original: RecordingManifest, to title: String) throws {
+        var recording = try store.load(id: original.id)
+        recording.title = RecordingManifest.normalizedTitle(title)
+        recording.titleSource = recording.title == nil ? nil : .user
+        try store.save(recording)
+        synchronizePortableMetadata(for: recording)
+        reloadHistory()
     }
 
     func renameSpeaker(
@@ -1933,6 +1897,8 @@ final class AppModel: ObservableObject {
                 for: recording.files.microphoneCaptureDirectory,
                 in: recording
             )
+            var nextState = captureStateMachine
+            try nextState.transition(.captureStarted)
             let engine = CaptureEngine()
             do {
                 try engine.start(
@@ -1980,13 +1946,12 @@ final class AppModel: ObservableObject {
             case .unresolved:
                 recording.markMeetingUnresolved(candidates: meetingChoice.candidates)
             case .none:
-                recording.clearMeetingAssociation(keepCandidates: false)
+                recording.clearMeetingAssociation()
             }
             recording.captureStartedAt = startedAt
             recording.timeZoneIdentifier = TimeZone.current.identifier
             do {
                 try store.save(recording)
-                try captureStateMachine.transition(.captureStarted)
             } catch {
                 _ = try? engine.stop()
                 recording.captureStatus = .failed
@@ -2007,7 +1972,7 @@ final class AppModel: ObservableObject {
             elapsedSeconds = 0
             captureStatistics = engine.statistics()
             fatalStopRequested = false
-            captureState = captureStateMachine.state
+            captureStateMachine = nextState
             recordingTitle = ""
             recordingTitleWasEdited = false
             calendarPrefilledTitle = nil
@@ -2204,12 +2169,12 @@ final class AppModel: ObservableObject {
                 origin: .importedAudio
             )
 
-            var recording = try store.createRecording(
+            var recording = RecordingManifest(
+                createdAt: metadata.startedAt,
                 language: language,
                 microphoneUID: "",
                 microphoneName: "Imported audio",
-                keyterms: activeKeyterms,
-                now: metadata.startedAt
+                keyterms: activeKeyterms
             )
             recording.origin = .importedAudio
             recording.timestampSource = metadata.timestampSource
@@ -2223,15 +2188,7 @@ final class AppModel: ObservableObject {
             recording.files.audio = audioURL.path
             recording.files.audioBookmark = try? store.bookmark(for: audioURL)
             recording.files.transcriptMarkdown = transcriptURL.path
-            try store.save(recording)
-            do {
-                try store.removeCaptureArtifacts(for: recording)
-            } catch {
-                recording.warnings.append(
-                    "Unused private working files could not be removed: \(error.localizedDescription)"
-                )
-                try store.save(recording)
-            }
+            try store.insertImportedRecording(recording)
             reloadHistory()
             refreshStorageUsage()
             jobQueue.wake()
@@ -2381,7 +2338,6 @@ final class AppModel: ObservableObject {
     private func transitionCapture(_ event: CaptureSessionEvent) -> Bool {
         do {
             try captureStateMachine.transition(event)
-            captureState = captureStateMachine.state
             return true
         } catch {
             captureIssue = CaptureIssue(message: error.localizedDescription)

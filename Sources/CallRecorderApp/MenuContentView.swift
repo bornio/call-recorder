@@ -544,7 +544,7 @@ private struct ActiveCaptureContent: View {
                     }
                     .font(.headline)
                     Spacer()
-                    Text(recordingDuration(model.elapsedSeconds))
+                    Text(formattedRecordingDuration(model.elapsedSeconds))
                         .font(.headline.monospacedDigit())
                         .accessibilityLabel("Elapsed recording time")
                         .accessibilityValue(accessibleDuration(model.elapsedSeconds))
@@ -629,7 +629,7 @@ private struct CaptureTransitionContent: View {
                     .font(.headline)
                 Spacer()
                 if let elapsedSeconds {
-                    Text(recordingDuration(elapsedSeconds))
+                    Text(formattedRecordingDuration(elapsedSeconds))
                         .font(.headline.monospacedDigit())
                         .accessibilityLabel("Elapsed recording time")
                         .accessibilityValue(accessibleDuration(elapsedSeconds))

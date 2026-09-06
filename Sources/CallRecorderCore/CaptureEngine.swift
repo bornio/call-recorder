@@ -5,21 +5,15 @@ public struct CaptureConfiguration: Sendable {
     public var systemDirectory: URL
     public var microphoneDirectory: URL
     public var microphoneUID: String
-    public var chunkDurationSeconds: UInt32
-    public var ringCapacityBlocks: UInt32
 
     public init(
         systemDirectory: URL,
         microphoneDirectory: URL,
-        microphoneUID: String,
-        chunkDurationSeconds: UInt32 = 15,
-        ringCapacityBlocks: UInt32 = 256
+        microphoneUID: String
     ) {
         self.systemDirectory = systemDirectory
         self.microphoneDirectory = microphoneDirectory
         self.microphoneUID = microphoneUID
-        self.chunkDurationSeconds = chunkDurationSeconds
-        self.ringCapacityBlocks = ringCapacityBlocks
     }
 }
 
@@ -81,9 +75,7 @@ public final class CaptureEngine: @unchecked Sendable {
                     var bridgeConfiguration = CRCaptureConfiguration(
                         system_directory: systemPath,
                         microphone_directory: microphonePath,
-                        microphone_uid: microphoneUID,
-                        chunk_duration_seconds: configuration.chunkDurationSeconds,
-                        ring_capacity_blocks: configuration.ringCapacityBlocks
+                        microphone_uid: microphoneUID
                     )
                     return cr_capture_start(
                         &bridgeConfiguration,

@@ -218,8 +218,9 @@ struct HistoryView: View {
                 recording: recording,
                 searchText: evaluatedSearchText,
                 searchMatches: selectedTranscriptMatches,
-                selectedSearchMatchIndex: $selectedSearchMatchIndex,
-                searchNavigationID: $searchNavigationID,
+                selectedSearchMatchIndex: selectedSearchMatchIndex,
+                searchNavigationID: searchNavigationID,
+                searchNavigation: transcriptSearchNavigation,
                 selectedSection: $selectedDetailSection,
                 deleteAction: { pendingDeletion = recording },
                 reuploadAction: { pendingReupload = recording }
@@ -508,13 +509,15 @@ private func recordingMatchesSearch(
         recording.calendarTitle ?? "",
         recording.calendarAttendeeNames?.joined(separator: " ") ?? "",
     ]
-    if metadata.contains(where: { $0.localizedCaseInsensitiveContains(query) }) {
+    if metadata.contains(where: { TranscriptSearchMatch.contains(query, in: $0) }) {
         return true
     }
     return snapshot.document?.segments.contains {
-        $0.text.localizedCaseInsensitiveContains(query) ||
-            recording.speakerDisplayName(channel: $0.channel, speaker: $0.speaker)
-                .localizedCaseInsensitiveContains(query)
+        TranscriptSearchMatch.contains(query, in: $0.text) ||
+            TranscriptSearchMatch.contains(
+                query,
+                in: recording.speakerDisplayName(channel: $0.channel, speaker: $0.speaker)
+            )
     } == true
 }
 

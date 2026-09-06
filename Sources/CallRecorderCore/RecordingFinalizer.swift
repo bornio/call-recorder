@@ -179,9 +179,7 @@ public struct RecordingFinalizer: Sendable {
             }
 
             let nominalDuration = Double(samples.count) / chunk.sampleRate
-            let hostDelta = chunk.lastHostTime >= chunk.firstHostTime
-                ? chunk.lastHostTime - chunk.firstHostTime
-                : 0
+            let hostDelta = chunk.lastHostTime - chunk.firstHostTime
             let hostDuration = Double(AudioConvertHostTimeToNanos(hostDelta)) / 1_000_000_000
                 + Double(chunk.lastFrames) / chunk.sampleRate
             let duration: Double
@@ -196,9 +194,7 @@ public struct RecordingFinalizer: Sendable {
             let targetCount = max(1, Int((duration * Double(Self.outputSampleRate)).rounded()))
             let resampled = linearResample(samples, outputCount: targetCount)
 
-            let originDelta = chunk.firstHostTime >= originHostTime
-                ? chunk.firstHostTime - originHostTime
-                : 0
+            let originDelta = chunk.firstHostTime - originHostTime
             var start = UInt64(
                 (Double(AudioConvertHostTimeToNanos(originDelta)) / 1_000_000_000
                     * Double(Self.outputSampleRate)).rounded()
@@ -267,9 +263,8 @@ public struct RecordingFinalizer: Sendable {
     }
 
     private func linearResample(_ input: [Float], outputCount: Int) -> [Float] {
-        guard outputCount > 0 else { return [] }
         guard input.count > 1, outputCount > 1 else {
-            return [Float](repeating: input.first ?? 0, count: outputCount)
+            return [Float](repeating: input[0], count: outputCount)
         }
         if input.count == outputCount { return input }
         let scale = Double(input.count - 1) / Double(outputCount - 1)

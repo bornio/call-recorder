@@ -13,7 +13,7 @@ struct MenuBarLabelView: View {
         HStack(spacing: 4) {
             Image(systemName: menuBarIcon)
             if model.isCaptureActive || model.captureState == .stopping {
-                Text(recordingDuration(model.elapsedSeconds))
+                Text(formattedRecordingDuration(model.elapsedSeconds))
                     .monospacedDigit()
             }
         }
@@ -103,14 +103,6 @@ struct MenuBarLabelView: View {
     private var backgroundNeedsAttention: Bool {
         model.hasRecordingNeedingAttention
     }
-}
-
-func recordingDuration(_ interval: TimeInterval) -> String {
-    let seconds = max(0, Int(interval))
-    if seconds >= 3_600 {
-        return String(format: "%02d:%02d:%02d", seconds / 3_600, (seconds / 60) % 60, seconds % 60)
-    }
-    return String(format: "%02d:%02d", seconds / 60, seconds % 60)
 }
 
 func accessibleDuration(_ interval: TimeInterval) -> String {

@@ -244,6 +244,37 @@ func runTranscriptionServiceTests() async throws {
         }
     }
 
+    try await runAsyncTest("cancellation preserves both interruption and persistence failures") {
+        try await withTemporaryDirectory(prefix: "CallRecorderTranscriptionTests") { root in
+            let store = RecordingStore(rootDirectory: root.appendingPathComponent("history"))
+            var recording = try store.createRecording(
+                language: .english, microphoneUID: "mic", microphoneName: "Mic"
+            )
+            let audioURL = root.appendingPathComponent("Audio.m4a")
+            try Data([1]).write(to: audioURL)
+            recording.captureStatus = .complete
+            recording.files.audio = audioURL.path
+            try store.save(recording)
+            let directory = try store.directory(for: recording)
+            let client = DeepgramClient { _, _ in
+                // Remove only this fixture's history after the request begins.
+                try FileManager.default.removeItem(at: directory)
+                throw CancellationError()
+            }
+            try await expectThrows(TranscriptionServiceError.self, matching: { error in
+                guard case .persistenceAfterFailure(let transcription, let persistence) = error else {
+                    return false
+                }
+                return !transcription.isEmpty && !persistence.isEmpty
+            }) {
+                try await TranscriptionService(client: client).transcribe(
+                    recording: recording, store: store, apiKey: "test-key"
+                )
+            }
+            try expectEqual(try Data(contentsOf: audioURL), Data([1]))
+        }
+    }
+
     try await runAsyncTest("saved Deepgram response recreates Markdown without key or upload") {
         try await withTemporaryDirectory(prefix: "CallRecorderTranscriptionTests") { root in
             let response = Data(
@@ -319,7 +350,7 @@ func runTranscriptionServiceTests() async throws {
             try sourceAudio.write(to: audioURL)
             try Data("keep me".utf8).write(to: existingTranscript)
 
-            var recording = try store.createRecording(
+            var recording = RecordingManifest(
                 language: .english,
                 microphoneUID: "",
                 microphoneName: "Imported audio"
@@ -329,7 +360,16 @@ func runTranscriptionServiceTests() async throws {
             recording.files.audio = audioURL.path
             recording.files.audioBookmark = try store.bookmark(for: audioURL)
             recording.files.transcriptMarkdown = existingTranscript.path
-            try store.save(recording)
+            try store.insertImportedRecording(recording)
+
+            let inserted = try store.load(id: recording.id)
+            try expectEqual(inserted.effectiveOrigin, .importedAudio)
+            try expectEqual(inserted.captureStatus, .complete)
+            try expectEqual(
+                try FileManager.default.contentsOfDirectory(atPath: store.directory(for: inserted).path),
+                ["manifest.json"]
+            )
+            try expectEqual(try Data(contentsOf: audioURL), sourceAudio)
 
             let completed = try await TranscriptionService(client: client).transcribe(
                 recording: recording,

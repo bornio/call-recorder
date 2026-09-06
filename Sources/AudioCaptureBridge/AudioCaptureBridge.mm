@@ -95,10 +95,8 @@ public:
         std::array<float, kMaximumFramesPerCallback> samples{};
     };
 
-    AudioWriter(std::string directory, uint32_t ring_capacity, uint32_t chunk_seconds)
-        : directory_(std::move(directory)),
-          capacity_(ring_capacity == 0 ? kDefaultRingCapacity : ring_capacity),
-          chunk_seconds_(chunk_seconds == 0 ? kDefaultChunkDurationSeconds : chunk_seconds) {}
+    explicit AudioWriter(std::string directory)
+        : directory_(std::move(directory)) {}
 
     ~AudioWriter() {
         stop();
@@ -120,7 +118,7 @@ public:
             return false;
         }
 
-        slots_.reset(new (std::nothrow) Slot[capacity_]);
+        slots_.reset(new (std::nothrow) Slot[kDefaultRingCapacity]);
         if (!slots_) {
             error = "Unable to allocate the bounded audio buffer.";
             return false;
@@ -175,7 +173,7 @@ public:
         const AudioBufferList *buffer_list,
         uint32_t frames,
         const AudioStreamBasicDescription &format,
-        const AudioTimeStamp *timestamp
+        uint64_t host_time
     ) noexcept {
         const uint64_t sequence = callback_sequence_++;
         if (buffer_list == nullptr || frames == 0) {
@@ -235,10 +233,7 @@ public:
         }
 
         slot->sequence = sequence;
-        slot->host_time = timestamp != nullptr &&
-                (timestamp->mFlags & kAudioTimeStampHostTimeValid) != 0
-            ? timestamp->mHostTime
-            : AudioGetCurrentHostTime();
+        slot->host_time = host_time;
         slot->frames = frames;
         level_.store(std::min(peak, 1.0f), std::memory_order_relaxed);
         captured_frames_.fetch_add(frames, std::memory_order_relaxed);
@@ -251,7 +246,7 @@ public:
         const AudioTimeStamp *render_timestamp,
         UInt32 bus,
         UInt32 frames,
-        const AudioTimeStamp *writer_timestamp
+        uint64_t host_time
     ) noexcept {
         const uint64_t sequence = callback_sequence_++;
         if (frames == 0 || frames > kMaximumFramesPerCallback) {
@@ -291,10 +286,7 @@ public:
             peak = std::max(peak, std::fabs(destination[frame]));
         }
         slot->sequence = sequence;
-        slot->host_time = writer_timestamp != nullptr &&
-                (writer_timestamp->mFlags & kAudioTimeStampHostTimeValid) != 0
-            ? writer_timestamp->mHostTime
-            : AudioGetCurrentHostTime();
+        slot->host_time = host_time;
         slot->frames = frames;
         level_.store(std::min(peak, 1.0f), std::memory_order_relaxed);
         captured_frames_.fetch_add(frames, std::memory_order_relaxed);
@@ -362,10 +354,10 @@ private:
     Slot *reserve_slot() noexcept {
         const uint64_t write = write_index_.load(std::memory_order_relaxed);
         const uint64_t read = read_index_.load(std::memory_order_acquire);
-        if (write - read >= capacity_) {
+        if (write - read >= kDefaultRingCapacity) {
             return nullptr;
         }
-        return &slots_[write % capacity_];
+        return &slots_[write % kDefaultRingCapacity];
     }
 
     void commit_slot() noexcept {
@@ -389,7 +381,7 @@ private:
                 continue;
             }
 
-            const Slot &slot = slots_[read % capacity_];
+            const Slot &slot = slots_[read % kDefaultRingCapacity];
             if (writer_error_.load(std::memory_order_relaxed) == 0) {
                 write_slot(slot);
             }
@@ -404,7 +396,7 @@ private:
         if (slot.sequence != last_sequence_ + 1) {
             return true;
         }
-        if (chunk_frames_ >= static_cast<uint64_t>(sample_rate_ * chunk_seconds_)) {
+        if (chunk_frames_ >= static_cast<uint64_t>(sample_rate_ * kDefaultChunkDurationSeconds)) {
             return true;
         }
         if (slot.host_time <= last_host_time_) {
@@ -547,8 +539,6 @@ private:
     }
 
     std::string directory_;
-    uint64_t capacity_;
-    uint32_t chunk_seconds_;
     std::unique_ptr<Slot[]> slots_;
     std::array<float, kMaximumFramesPerCallback> scratch_{};
     std::atomic<uint64_t> write_index_{0};
@@ -578,14 +568,8 @@ private:
 class CaptureEngine final {
 public:
     explicit CaptureEngine(const CRCaptureConfiguration &configuration)
-        : system_writer_(
-              configuration.system_directory,
-              configuration.ring_capacity_blocks,
-              configuration.chunk_duration_seconds),
-          microphone_writer_(
-              configuration.microphone_directory,
-              configuration.ring_capacity_blocks,
-              configuration.chunk_duration_seconds),
+        : system_writer_(configuration.system_directory),
+          microphone_writer_(configuration.microphone_directory),
           microphone_uid_(configuration.microphone_uid) {}
 
     ~CaptureEngine() {
@@ -729,11 +713,7 @@ private:
             frames = first_buffer.mDataByteSize /
                 (first_buffer.mNumberChannels * sizeof(float));
         }
-        AudioTimeStamp adjusted_time{};
-        const AudioTimeStamp *writer_time = engine->adjusted_timestamp(
-            input_time,
-            adjusted_time
-        );
+        const uint64_t writer_time = engine->adjusted_host_time(input_time);
         engine->system_writer_.push_downmixed(
             input,
             frames,
@@ -768,11 +748,7 @@ private:
             }
             return status;
         }
-        AudioTimeStamp adjusted_time{};
-        const AudioTimeStamp *writer_time = engine->adjusted_timestamp(
-            timestamp,
-            adjusted_time
-        );
+        const uint64_t writer_time = engine->adjusted_host_time(timestamp);
         const OSStatus status = engine->microphone_writer_.render_microphone(
             engine->microphone_unit_,
             flags,
@@ -787,22 +763,13 @@ private:
         return status;
     }
 
-    const AudioTimeStamp *adjusted_timestamp(
-        const AudioTimeStamp *timestamp,
-        AudioTimeStamp &adjusted
-    ) const noexcept {
-        if (timestamp != nullptr) {
-            adjusted = *timestamp;
-        }
-        if ((adjusted.mFlags & kAudioTimeStampHostTimeValid) == 0) {
-            adjusted.mHostTime = AudioGetCurrentHostTime();
-            adjusted.mFlags |= kAudioTimeStampHostTimeValid;
-        }
+    uint64_t adjusted_host_time(const AudioTimeStamp *timestamp) const noexcept {
+        const uint64_t host_time = timestamp != nullptr &&
+                (timestamp->mFlags & kAudioTimeStampHostTimeValid) != 0
+            ? timestamp->mHostTime
+            : AudioGetCurrentHostTime();
         const uint64_t paused_host_time = paused_host_time_.load(std::memory_order_relaxed);
-        if (adjusted.mHostTime >= paused_host_time) {
-            adjusted.mHostTime -= paused_host_time;
-        }
-        return &adjusted;
+        return host_time >= paused_host_time ? host_time - paused_host_time : host_time;
     }
 
     static OSStatus default_output_changed(

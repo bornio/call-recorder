@@ -308,11 +308,11 @@ public struct RecordingManifest: Codable, Equatable, Identifiable, Sendable {
         calendarCandidates = candidates.isEmpty ? nil : candidates
     }
 
-    public mutating func clearMeetingAssociation(keepCandidates: Bool = false) {
+    public mutating func clearMeetingAssociation() {
         let shouldClearTitle = effectiveTitleSource == .calendar
         clearAssignedMeeting()
         meetingAssociationState = MeetingAssociationState.none
-        if !keepCandidates { calendarCandidates = nil }
+        calendarCandidates = nil
         if shouldClearTitle {
             title = nil
             titleSource = nil
@@ -363,10 +363,7 @@ public struct RecordingManifest: Codable, Equatable, Identifiable, Sendable {
     }
 
     public static func normalizedLocalSpeakerName(_ value: String?) -> String {
-        let words = (value ?? "").split(whereSeparator: { $0.isWhitespace })
-        let normalized = words.joined(separator: " ")
-        guard !normalized.isEmpty else { return Self.defaultLocalSpeakerName }
-        return String(normalized.prefix(64))
+        normalizedSpeakerName(value) ?? defaultLocalSpeakerName
     }
 
     public func speakerDisplayName(channel: Int, speaker: Int?) -> String {

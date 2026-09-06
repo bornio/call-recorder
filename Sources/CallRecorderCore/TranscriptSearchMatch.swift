@@ -8,12 +8,13 @@ public struct TranscriptSearchMatch: Equatable, Sendable {
 
     public let segmentIndex: Int
     public let field: Field
-    public let occurrenceIndex: Int
+    /// UTF-16 range relative to the displayed speaker name or segment text.
+    public let range: NSRange
 
-    public init(segmentIndex: Int, field: Field, occurrenceIndex: Int) {
+    public init(segmentIndex: Int, field: Field, range: NSRange) {
         self.segmentIndex = segmentIndex
         self.field = field
-        self.occurrenceIndex = occurrenceIndex
+        self.range = range
     }
 
     public static func find(
@@ -41,6 +42,11 @@ public struct TranscriptSearchMatch: Equatable, Sendable {
         }
     }
 
+    public static func contains(_ query: String, in value: String) -> Bool {
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !query.isEmpty && value.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+    }
+
     private static func matches(
         in value: String,
         query: String,
@@ -60,7 +66,7 @@ public struct TranscriptSearchMatch: Equatable, Sendable {
                 TranscriptSearchMatch(
                     segmentIndex: segmentIndex,
                     field: field,
-                    occurrenceIndex: matches.count
+                    range: NSRange(range, in: value)
                 )
             )
             searchStart = range.upperBound

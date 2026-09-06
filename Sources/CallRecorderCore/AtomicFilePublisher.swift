@@ -44,7 +44,7 @@ enum AtomicFilePublisher {
                 try? FileManager.default.removeItem(at: temporary)
             }
         }
-        try data.write(to: temporary, options: [.atomic])
+        try data.write(to: temporary)
         let descriptor = open(temporary.path, O_RDONLY)
         guard descriptor >= 0 else { throw posixError() }
         defer { close(descriptor) }

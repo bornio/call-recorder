@@ -64,7 +64,7 @@ public struct TranscriptDocument: Equatable, Sendable {
                 return TranscriptSegment(
                     start: utterance.start,
                     end: utterance.end,
-                    channel: utterance.channel?.value ?? 0,
+                    channel: utterance.channel ?? 0,
                     speaker: utterance.speaker ?? utterance.words?.first?.speaker,
                     text: text,
                     transcriptionConfidence: utterance.confidence
@@ -106,7 +106,7 @@ public struct TranscriptDocument: Equatable, Sendable {
         response.results.channels.enumerated().flatMap { channel, value -> [TranscriptSegment] in
             guard let alternative = value.alternatives.first else { return [] }
             let utterances = (response.results.utterances ?? []).filter {
-                ($0.channel?.value ?? 0) == channel
+                ($0.channel ?? 0) == channel
             }
             return (alternative.paragraphs?.paragraphs ?? []).compactMap { paragraph in
                 let rawText = paragraph.sentences
@@ -551,7 +551,7 @@ private struct DeepgramSentence: Decodable {
 private struct DeepgramUtterance: Decodable {
     var start: Double
     var end: Double
-    var channel: FlexibleInteger?
+    var channel: Int?
     var speaker: Int?
     var transcript: String
     var confidence: Double?
@@ -575,28 +575,5 @@ private struct DeepgramWord: Decodable {
         case speaker
         case confidence
         case speakerConfidence = "speaker_confidence"
-    }
-}
-
-private struct FlexibleInteger: Decodable {
-    var value: Int
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        if let integer = try? container.decode(Int.self) {
-            value = integer
-        } else if let integers = try? container.decode([Int].self), let first = integers.first {
-            value = first
-        } else if let string = try? container.decode(String.self), let integer = Int(string) {
-            value = integer
-        } else {
-            throw DecodingError.typeMismatch(
-                Int.self,
-                DecodingError.Context(
-                    codingPath: decoder.codingPath,
-                    debugDescription: "Expected an integer channel identifier."
-                )
-            )
-        }
     }
 }

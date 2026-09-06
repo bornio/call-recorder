@@ -7,8 +7,9 @@ struct RecordingDetailView: View {
     let recording: RecordingManifest
     let searchText: String
     let searchMatches: [TranscriptSearchMatch]
-    @Binding var selectedSearchMatchIndex: Int
-    @Binding var searchNavigationID: Int
+    let selectedSearchMatchIndex: Int
+    let searchNavigationID: Int
+    let searchNavigation: RecordingSearchNavigation?
     @Binding var selectedSection: RecordingDetailSection
     let deleteAction: () -> Void
     let reuploadAction: () -> Void
@@ -78,11 +79,6 @@ struct RecordingDetailView: View {
         }
         .onChange(of: model.historySearchText) { _, _ in reading.suspendFollowing() }
         .onChange(of: searchNavigationID) { _, _ in reading.suspendFollowing() }
-        .onChange(of: recording.id) { _, _ in
-            resetTitleEditor()
-            model.ensureTranscriptLoaded(for: recording)
-            model.refreshMeetingChoices(for: recording)
-        }
         .onChange(of: recording.title) { _, _ in
             if !isEditingTitle {
                 titleDraft = recording.displayTitle
@@ -130,7 +126,7 @@ struct RecordingDetailView: View {
                 Text(recordedDate(recording.effectiveStartedAt, detail: false))
                 if let duration = recording.durationSeconds {
                     Text("·")
-                    Text(segmentTimestamp(duration))
+                    Text(formattedRecordingDuration(duration))
                 }
                 Text("·")
                 Text(recording.language.displayName)
@@ -154,7 +150,7 @@ struct RecordingDetailView: View {
                     .font(.title.bold())
                     .focused($titleIsFocused)
                     .onSubmit { saveTitle() }
-                    .onExitCommand { cancelTitleEditing() }
+                    .onExitCommand { resetTitleEditor() }
                     .disabled(!model.canEditMetadata(for: recording))
                     .accessibilityLabel("Recording title")
 
@@ -167,7 +163,7 @@ struct RecordingDetailView: View {
                 .disabled(!hasTitleChanges || !model.canEditMetadata(for: recording))
                 .help("Save title")
 
-                Button(action: cancelTitleEditing) {
+                Button(action: resetTitleEditor) {
                     Label("Cancel editing title", systemImage: "xmark")
                         .labelStyle(.iconOnly)
                 }
@@ -209,20 +205,20 @@ struct RecordingDetailView: View {
                             .accessibilityLabel(searchMatchAccessibilityLabel)
                         Spacer()
                         ControlGroup {
-                            Button(action: showPreviousSearchMatch) {
+                            Button(action: { searchNavigation?.previous() }) {
                                 Label("Previous match", systemImage: "chevron.up")
                                     .labelStyle(.iconOnly)
                             }
                             .help("Previous match (⇧⌘G)")
 
-                            Button(action: showNextSearchMatch) {
+                            Button(action: { searchNavigation?.next() }) {
                                 Label("Next match", systemImage: "chevron.down")
                                     .labelStyle(.iconOnly)
                             }
                             .help("Next match (Return or ⌘G)")
                         }
                         .controlSize(.small)
-                        .disabled(searchMatches.isEmpty)
+                        .disabled(searchNavigation?.canNavigate != true)
                     }
                     .padding(.horizontal, 28)
                     .padding(.vertical, 8)
@@ -251,7 +247,7 @@ struct RecordingDetailView: View {
 
                 TranscriptTextView(
                     document: document, recording: recording, player: audioPlayer, reading: reading,
-                    searchText: normalizedSearch, activeMatch: activeSearchMatch,
+                    searchMatches: searchMatches, activeMatch: activeSearchMatch,
                     searchNavigationID: searchNavigationID, rename: beginRename
                 )
             }
@@ -302,7 +298,7 @@ struct RecordingDetailView: View {
                     infoRow("Ended", recordedDate(endedAt, detail: true))
                 }
                 if let duration = recording.durationSeconds {
-                    infoRow("Duration", segmentTimestamp(duration))
+                    infoRow("Duration", formattedRecordingDuration(duration))
                 }
                 infoRow("Audio", recording.audioStatusText(hasRecoveryAudio: model.recoveryBytes(for: recording) > 0))
                 infoRow("Transcript", recording.transcriptStatusText)
@@ -505,30 +501,6 @@ struct RecordingDetailView: View {
         return searchMatches[selectedSearchMatchIndex]
     }
 
-    private func showNextSearchMatch() {
-        guard !searchMatches.isEmpty else { return }
-        reading.suspendFollowing()
-        searchNavigationID += 1
-        selectedSearchMatchIndex = (selectedSearchMatchIndex + 1) % searchMatches.count
-        announceSearchMatch()
-    }
-
-    private func showPreviousSearchMatch() {
-        guard !searchMatches.isEmpty else { return }
-        reading.suspendFollowing()
-        searchNavigationID += 1
-        selectedSearchMatchIndex =
-            (selectedSearchMatchIndex - 1 + searchMatches.count) % searchMatches.count
-        announceSearchMatch()
-    }
-
-    private func announceSearchMatch() {
-        announceRecordingSearchMatch(
-            index: selectedSearchMatchIndex,
-            count: searchMatches.count
-        )
-    }
-
     private var hasTitleChanges: Bool {
         RecordingManifest.normalizedTitle(titleDraft) !=
             RecordingManifest.normalizedTitle(recording.displayTitle)
@@ -540,13 +512,6 @@ struct RecordingDetailView: View {
         titleSaveErrorMessage = nil
         isEditingTitle = true
         titleIsFocused = true
-    }
-
-    private func cancelTitleEditing() {
-        titleDraft = recording.displayTitle
-        titleSaveErrorMessage = nil
-        isEditingTitle = false
-        titleIsFocused = false
     }
 
     private func resetTitleEditor() {
@@ -567,16 +532,13 @@ struct RecordingDetailView: View {
             return
         }
 
-        let errorBeforeSave = model.historyErrorMessage
-        if model.renameRecording(recording, to: titleDraft) {
+        do {
+            try model.renameRecording(recording, to: titleDraft)
             titleSaveErrorMessage = nil
             isEditingTitle = false
             titleIsFocused = false
-        } else {
-            titleSaveErrorMessage = model.historyErrorMessage ?? "Call Recorder couldn't save this title."
-            if model.historyErrorMessage != errorBeforeSave {
-                model.historyErrorMessage = errorBeforeSave
-            }
+        } catch {
+            titleSaveErrorMessage = error.localizedDescription
             titleIsFocused = true
         }
     }
@@ -640,17 +602,7 @@ struct RecordingDetailView: View {
     }
 }
 
-private struct SpeakerRenameTarget: Identifiable {
+private struct SpeakerRenameTarget {
     var channel: Int
     var speaker: Int?
-
-    var id: String { "\(channel):\(speaker ?? 0)" }
-}
-
-private func segmentTimestamp(_ interval: TimeInterval) -> String {
-    let seconds = max(0, Int(interval.rounded(.down)))
-    if seconds >= 3_600 {
-        return String(format: "%d:%02d:%02d", seconds / 3_600, (seconds / 60) % 60, seconds % 60)
-    }
-    return String(format: "%02d:%02d", seconds / 60, seconds % 60)
 }

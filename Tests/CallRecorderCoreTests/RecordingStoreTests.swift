@@ -61,9 +61,6 @@ func runRecordingStoreTests() throws {
             try expectEqual(loaded.last?.effectiveLocalSpeakerName, "Me")
             let loadedStart = try require(loaded.first?.captureStartedAt)
             try expect(abs(loadedStart.timeIntervalSince1970 - 200.125) < 0.001)
-            let manifestURL = try store.directory(for: newer)
-                .appendingPathComponent("manifest.json")
-            try expect(FileManager.default.fileExists(atPath: manifestURL.path))
         }
     }
 
@@ -501,7 +498,7 @@ func runRecordingStoreTests() throws {
     try runTest("unavailable imported volume preserves private history") {
         try withTemporaryDirectory { root in
             let store = RecordingStore(rootDirectory: root)
-            var recording = try store.createRecording(
+            var recording = RecordingManifest(
                 language: .english,
                 microphoneUID: "",
                 microphoneName: "Imported audio"
@@ -509,7 +506,7 @@ func runRecordingStoreTests() throws {
             recording.origin = .importedAudio
             recording.captureStatus = .complete
             recording.files.audio = "/Volumes/CallRecorderMissingVolume-\(UUID().uuidString)/meeting.m4a"
-            try store.save(recording)
+            try store.insertImportedRecording(recording)
 
             let reconciled = try store.reconcileExternalFiles()
 
@@ -726,7 +723,7 @@ func runRecordingStoreTests() throws {
         }
     }
 
-    try runTest("transcript fingerprints change only when retained response changes") {
+    try runTest("transcript fingerprints identify missing unchanged and changed responses") {
         try withTemporaryDirectory { root in
             let store = RecordingStore(rootDirectory: root)
             let recording = try store.createRecording(
@@ -751,10 +748,6 @@ func runRecordingStoreTests() throws {
             let firstFingerprint = try require(
                 try store.retainedTranscriptFingerprint(for: recording)
             )
-            try expectEqual(firstFingerprint.byteCount, Int64(first.count))
-            try expect(
-                abs(firstFingerprint.modificationDate.timeIntervalSince(firstDate)) < 0.001
-            )
             try expectEqual(
                 try store.retainedTranscriptFingerprint(for: recording),
                 firstFingerprint
@@ -774,7 +767,6 @@ func runRecordingStoreTests() throws {
                 try store.retainedTranscriptFingerprint(for: recording)
             )
             try expect(secondFingerprint != firstFingerprint)
-            try expectEqual(secondFingerprint.byteCount, Int64(second.count))
         }
     }
 

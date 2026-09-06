@@ -20,7 +20,7 @@ struct TranscriptTextView: NSViewRepresentable {
     let recording: RecordingManifest
     @ObservedObject var player: RecordingAudioPlayerModel
     @ObservedObject var reading: TranscriptReadingState
-    let searchText: String
+    let searchMatches: [TranscriptSearchMatch]
     let activeMatch: TranscriptSearchMatch?
     let searchNavigationID: Int
     let rename: (TranscriptSegment) -> Void
@@ -59,7 +59,7 @@ struct TranscriptTextView: NSViewRepresentable {
         private var timestamps: [NSRange] = []
         private var renderedDocument: TranscriptDocument?
         private var renderedNames: [String] = []
-        private var renderedSearch = ""
+        private var renderedMatches: [TranscriptSearchMatch] = []
         private var renderedActiveMatch: TranscriptSearchMatch?
         private var currentEntries: [TranscriptPlaybackTimeline.Entry] = []
         private var wasPreview = false
@@ -99,16 +99,14 @@ struct TranscriptTextView: NSViewRepresentable {
                 ? timeline?.activeEntries(at: value.player.displayTime, duration: value.player.duration) ?? []
                 : []
             let preview = value.player.previewTime != nil
-            if changed || renderedSearch != value.searchText {
-                searchRanges = TranscriptSearchMatch.find(in: value.document, query: value.searchText) {
-                    value.recording.speakerDisplayName(channel: $0.channel, speaker: $0.speaker)
-                }.compactMap { match in searchRange(match).map { (match, $0) } }
+            if changed || renderedMatches != value.searchMatches {
+                searchRanges = value.searchMatches.compactMap { match in searchRange(match).map { (match, $0) } }
             }
             if changed || active != currentEntries || preview != wasPreview ||
-                renderedSearch != value.searchText || renderedActiveMatch != value.activeMatch {
+                renderedMatches != value.searchMatches || renderedActiveMatch != value.activeMatch {
                 currentEntries = active
                 wasPreview = preview
-                renderedSearch = value.searchText
+                renderedMatches = value.searchMatches
                 renderedActiveMatch = value.activeMatch
                 updateHighlights()
             }
@@ -225,7 +223,6 @@ struct TranscriptTextView: NSViewRepresentable {
                         : NSUnderlineStyle.single.rawValue,
                 ], forCharacterRange: range)
             }
-            guard !value.searchText.isEmpty else { return }
             for (match, range) in searchRanges {
                 layout.addTemporaryAttribute(.backgroundColor,
                     value: NSColor.systemYellow.withAlphaComponent(match == value.activeMatch ? 0.65 : 0.3),
@@ -237,17 +234,10 @@ struct TranscriptTextView: NSViewRepresentable {
         }
 
         private func searchRange(_ match: TranscriptSearchMatch) -> NSRange? {
-            guard let value = input, bodies.indices.contains(match.segmentIndex), !value.searchText.isEmpty else { return nil }
+            guard bodies.indices.contains(match.segmentIndex) else { return nil }
             let base = match.field == .speaker ? speakers[match.segmentIndex] : bodies[match.segmentIndex]
-            guard let string = scroll?.transcript.string as NSString? else { return nil }
-            var remaining = base
-            for occurrence in 0...match.occurrenceIndex {
-                let found = string.range(of: value.searchText, options: [.caseInsensitive, .diacriticInsensitive], range: remaining)
-                guard found.location != NSNotFound else { return nil }
-                if occurrence == match.occurrenceIndex { return found }
-                remaining = NSRange(location: NSMaxRange(found), length: NSMaxRange(base) - NSMaxRange(found))
-            }
-            return nil
+            guard match.range.location >= 0, NSMaxRange(match.range) <= base.length else { return nil }
+            return NSRange(location: base.location + match.range.location, length: match.range.length)
         }
 
         private func revealPlayback(force: Bool) {

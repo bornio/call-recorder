@@ -56,12 +56,10 @@ public enum CalendarEventMatchPolicy {
 
     public static func matchAtRecordingStart(
         from candidates: [CalendarEventCandidate],
-        now: Date,
-        earlyJoinTolerance: TimeInterval = earlyJoinTolerance,
-        overrunTolerance: TimeInterval = overrunTolerance
+        now: Date
     ) -> CalendarStartMatch {
-        let earliestPreviousEnd = now.addingTimeInterval(-max(0, overrunTolerance))
-        let latestUpcomingStart = now.addingTimeInterval(max(0, earlyJoinTolerance))
+        let earliestPreviousEnd = now.addingTimeInterval(-overrunTolerance)
+        let latestUpcomingStart = now.addingTimeInterval(earlyJoinTolerance)
         let plausible = normalized(candidates).filter { candidate in
             let isPreviousOverrun = candidate.endDate <= now &&
                 candidate.endDate >= earliestPreviousEnd
@@ -80,21 +78,17 @@ public enum CalendarEventMatchPolicy {
     public static func resolveAfterRecording(
         from candidates: [CalendarEventCandidate],
         recordingStart: Date,
-        recordingEnd: Date,
-        earlyJoinTolerance: TimeInterval = earlyJoinTolerance,
-        overrunTolerance: TimeInterval = overrunTolerance,
-        minimumCoverage: Double = 0.6,
-        minimumLead: Double = 0.25
+        recordingEnd: Date
     ) -> CalendarEventCandidate? {
         let duration = recordingEnd.timeIntervalSince(recordingStart)
         guard duration > 0 else { return nil }
 
         let scored = normalized(candidates).map { candidate in
             let plausibleStart = candidate.startDate.addingTimeInterval(
-                -max(0, earlyJoinTolerance)
+                -earlyJoinTolerance
             )
             let plausibleEnd = candidate.endDate.addingTimeInterval(
-                max(0, overrunTolerance)
+                overrunTolerance
             )
             let overlapStart = max(recordingStart, plausibleStart)
             let overlapEnd = min(recordingEnd, plausibleEnd)
@@ -108,10 +102,10 @@ public enum CalendarEventMatchPolicy {
         }
 
         guard let winner = scored.first,
-              winner.coverage >= minimumCoverage
+              winner.coverage >= 0.6
         else { return nil }
         if scored.count > 1,
-           winner.coverage - scored[1].coverage < minimumLead {
+           winner.coverage - scored[1].coverage < 0.25 {
             return nil
         }
         return winner.candidate

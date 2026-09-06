@@ -87,22 +87,14 @@ public struct TranscriptionService: Sendable {
             recording.lastFailure = nil
             try store.save(recording)
             return recording
-        } catch is CancellationError {
-            recording.transcriptionStatus = .failed
-            recording.lastFailure = RecordingFailure(
-                stage: .transcription,
-                message: "Transcription was interrupted. Deepgram may already have processed the audio; retry manually if needed.",
-                occurredAt: now
-            )
-            try store.save(recording)
-            _ = try? store.synchronizeTranscriptMetadata(for: recording)
-            throw CancellationError()
         } catch {
             let transcriptionError = error
             recording.transcriptionStatus = .failed
             recording.lastFailure = RecordingFailure(
                 stage: .transcription,
-                message: transcriptionError.localizedDescription,
+                message: transcriptionError is CancellationError
+                    ? "Transcription was interrupted. Deepgram may already have processed the audio; retry manually if needed."
+                    : transcriptionError.localizedDescription,
                 occurredAt: now
             )
             do {

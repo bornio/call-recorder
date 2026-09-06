@@ -15,8 +15,6 @@ typedef struct {
     const char *system_directory;
     const char *microphone_directory;
     const char *microphone_uid;
-    uint32_t chunk_duration_seconds;
-    uint32_t ring_capacity_blocks;
 } CRCaptureConfiguration;
 
 typedef struct {

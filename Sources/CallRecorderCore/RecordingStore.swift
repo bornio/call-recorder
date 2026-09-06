@@ -132,6 +132,13 @@ public struct RecordingStore: Sendable {
         return manifest
     }
 
+    public func insertImportedRecording(_ manifest: RecordingManifest) throws {
+        precondition(manifest.effectiveOrigin == .importedAudio && manifest.captureStatus == .complete)
+        let directory = recordingDirectory(id: manifest.id, createdAt: manifest.createdAt)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        try save(manifest, in: directory)
+    }
+
     public func save(_ manifest: RecordingManifest) throws {
         guard let directory = try findRecordingDirectory(id: manifest.id) else {
             throw RecordingStoreError.missingManifest(manifest.id)

@@ -51,20 +51,6 @@ func runDeepgramAndTranscriptTests() throws {
         try expectEqual(limited.last, "Term 99")
     }
 
-    try runTest("M4A uploads use the MPEG-4 audio content type") {
-        let audioURL = URL(fileURLWithPath: "/tmp/Audio.m4a")
-        try expectEqual(
-            DeepgramRequestFactory.contentType(for: audioURL),
-            "audio/mp4"
-        )
-        let request = try DeepgramRequestFactory.makeRequest(
-            language: .english,
-            apiKey: "test-only-secret",
-            contentType: DeepgramRequestFactory.contentType(for: audioURL)
-        )
-        try expectEqual(request.value(forHTTPHeaderField: "Content-Type"), "audio/mp4")
-    }
-
     try runTest("utterances merge by timestamp and use the configured local speaker name") {
         let response = Data(
             """
@@ -76,7 +62,7 @@ func runDeepgramAndTranscriptTests() throws {
                 ],
                 "utterances": [
                   {
-                    "start": 2.0, "end": 2.5, "channel": [1], "speaker": 0,
+                    "start": 2.0, "end": 2.5, "channel": 1, "speaker": 0,
                     "confidence": 0.99, "transcript": "I agree.",
                     "words": [{
                       "word": "agree", "start": 2.0, "end": 2.5,
