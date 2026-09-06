@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.0 — 2026-09-06
+
+Call Recorder 0.6.0 keeps audio and transcript review in sync while letting you read at your own pace.
+
+- The current sentence is highlighted during playback. **Follow audio** keeps it visible and pauses following when you scroll, select text, search, or edit. Turn it back on whenever you want to catch up.
+- Scrubbing previews the destination in the transcript, then resumes audio only if it was already playing. Timestamp and slider seeks keep your play/pause state and reveal the destination without changing your follow preference.
+- Searching keeps your current recording open and playing, even when it is outside the filtered results. Moving between search matches changes only your reading position.
+- Text selection stays intact as playback advances, and switching between Transcript and Info preserves your reading position.
+- Closing Recordings pauses playback. Starting a new recording also pauses review audio and keeps it disabled until recording finishes.
+- The recording-title field now has enough room to display its full blue focus ring.
+
+For Apple silicon Macs running macOS 14.2 or later. This build is not notarized; on first launch, macOS may require **System Settings → Privacy & Security → Open Anyway**.
+
+[Full diff from 0.5.0](https://github.com/bornio/call-recorder/compare/v0.5.0...v0.6.0)
+
 ## 0.5.0 — 2026-09-05
 
 Call Recorder 0.5.0 makes recording controls easier to reach and keeps speaker

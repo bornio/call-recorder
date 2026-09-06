@@ -42,7 +42,10 @@ struct MenuContentView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                // Native focus rings extend beyond their controls' bounds.
+                .padding(4)
             }
+            .padding(.horizontal, -4)
             .frame(height: 300)
             .scrollBounceBehavior(.basedOnSize)
 

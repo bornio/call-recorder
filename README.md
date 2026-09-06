@@ -90,7 +90,21 @@ open -n ".build/Call Recorder.app" --args --open-recordings
 ```
 
 In Recordings, click a transcript timestamp to seek without changing whether
-audio is playing or paused. Saving a speaker rename updates the in-app labels,
+audio is playing or paused. The current sentence is highlighted using retained
+transcription timing; older transcripts fall back to passage timing. **Follow
+audio** starts enabled. Scrolling, selecting text, searching, or editing metadata
+suspends following until you explicitly enable it again. Timestamp and slider
+seeks reveal the destination once and preserve your follow choice.
+
+Dragging the playback slider pauses audio and shows a distinct transcript
+preview. Release commits the destination and resumes only if audio was playing
+before the drag; Escape cancels. Keyboard and accessibility slider adjustments
+seek directly. Search navigation only moves the transcript, and filtering keeps
+the current recording loaded even when it is outside the results. Closing
+Recordings pauses playback. Starting live capture also pauses review playback
+and disables it until capture finishes; it does not resume automatically.
+
+Saving a speaker rename updates the in-app labels,
 **Copy Transcript**, and the saved Markdown when it still matches the
 app-generated transcript. If the Markdown has other changes or is unavailable,
 the app preserves it and explains how to export a corrected copy.

@@ -39,6 +39,7 @@ struct StatusLabel: View {
 struct MeetingAssociationMenu: View {
     @EnvironmentObject private var model: AppModel
     let recording: RecordingManifest
+    let willEdit: () -> Void
 
     var body: some View {
         Menu {
@@ -47,6 +48,7 @@ struct MeetingAssociationMenu: View {
             } else {
                 ForEach(choices) { event in
                     Button {
+                        willEdit()
                         model.assignMeeting(event, to: recording)
                     } label: {
                         if event.identifier == recording.calendarEventIdentifier {
@@ -61,6 +63,7 @@ struct MeetingAssociationMenu: View {
             Divider()
 
             Button("No calendar meeting") {
+                willEdit()
                 model.clearMeetingAssociation(for: recording)
             }
 

@@ -11,6 +11,8 @@ struct HistoryView: View {
     @State private var searchUpdateTask: Task<Void, Never>?
     @State private var isUpdatingSearchResults = false
     @State private var selectedSearchMatchIndex = 0
+    @State private var searchNavigationID = 0
+    @State private var matchedRecordingID: UUID?
     @State private var selectedDetailSection = RecordingDetailSection.transcript
     @State private var pendingDeletion: RecordingManifest?
     @State private var pendingReupload: RecordingManifest?
@@ -69,6 +71,7 @@ struct HistoryView: View {
             }
             .onChange(of: model.selectedHistoryRecordingID) { _, _ in
                 selectedSearchMatchIndex = 0
+                selectedTranscriptMatches = []
                 scheduleSearchUpdate(debounced: false)
             }
             .onChange(of: selectedTranscriptMatches.count) { _, count in
@@ -86,7 +89,7 @@ struct HistoryView: View {
             .onReceive(model.$transcriptDocuments) { _ in
                 scheduleSearchUpdate(debounced: false)
             }
-            .onChange(of: filteredRecordingIDs, initial: true) { _, ids in
+            .onChange(of: model.recordings.map(\.id), initial: true) { _, ids in
                 if let selectedRecordingID = model.selectedHistoryRecordingID,
                    ids.contains(selectedRecordingID) {
                     return
@@ -179,7 +182,10 @@ struct HistoryView: View {
         } else if filteredRecordings.isEmpty {
             searchEmptyState
         } else {
-            List(filteredRecordings, selection: $model.selectedHistoryRecordingID) { recording in
+            List(filteredRecordings, selection: Binding(
+                get: { model.selectedHistoryRecordingID },
+                set: { if let id = $0 { model.selectedHistoryRecordingID = id } }
+            )) { recording in
                 RecordingSidebarRow(
                     recording: recording,
                     recoveryBytes: model.recoveryBytes(for: recording)
@@ -213,12 +219,24 @@ struct HistoryView: View {
                 searchText: evaluatedSearchText,
                 searchMatches: selectedTranscriptMatches,
                 selectedSearchMatchIndex: $selectedSearchMatchIndex,
+                searchNavigationID: $searchNavigationID,
                 selectedSection: $selectedDetailSection,
                 deleteAction: { pendingDeletion = recording },
                 reuploadAction: { pendingReupload = recording }
             )
             .environmentObject(model)
             .id(recording.id)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if !normalizedSearchText.isEmpty, !isUpdatingSearchResults,
+                   !matchingRecordingIDs.contains(recording.id) {
+                    Text("Current recording is outside these results")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(8)
+                        .background(.bar)
+                }
+            }
         } else if filteredRecordings.isEmpty, !model.historySearchText.isEmpty {
             searchEmptyState
         } else {
@@ -303,13 +321,9 @@ struct HistoryView: View {
         return model.recordings.filter { matchingRecordingIDs.contains($0.id) }
     }
 
-    private var filteredRecordingIDs: [UUID] {
-        filteredRecordings.map(\.id)
-    }
-
     private var selectedRecording: RecordingManifest? {
         guard let selectedRecordingID = model.selectedHistoryRecordingID else { return nil }
-        return filteredRecordings.first { $0.id == selectedRecordingID }
+        return model.recordings.first { $0.id == selectedRecordingID }
     }
 
     private var normalizedSearchText: String {
@@ -393,8 +407,13 @@ struct HistoryView: View {
 
             guard let result,
                   !Task.isCancelled,
-                  query == normalizedSearchText
+                  query == normalizedSearchText,
+                  selectedRecordingID == model.selectedHistoryRecordingID
             else { return }
+            if evaluatedSearchText != query || matchedRecordingID != selectedRecordingID {
+                searchNavigationID += 1
+            }
+            matchedRecordingID = selectedRecordingID
             matchingRecordingIDs = result.0
             evaluatedSearchText = query
             selectedTranscriptMatches = result.1
@@ -406,6 +425,7 @@ struct HistoryView: View {
         let count = selectedTranscriptMatches.count
         guard count > 0 else { return }
         selectedDetailSection = .transcript
+        searchNavigationID += 1
         selectedSearchMatchIndex = (selectedSearchMatchIndex + 1) % count
         announceSearchMatch()
     }
@@ -414,6 +434,7 @@ struct HistoryView: View {
         let count = selectedTranscriptMatches.count
         guard count > 0 else { return }
         selectedDetailSection = .transcript
+        searchNavigationID += 1
         selectedSearchMatchIndex = (selectedSearchMatchIndex - 1 + count) % count
         announceSearchMatch()
     }

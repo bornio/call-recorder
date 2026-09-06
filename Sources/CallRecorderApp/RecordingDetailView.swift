@@ -8,6 +8,7 @@ struct RecordingDetailView: View {
     let searchText: String
     let searchMatches: [TranscriptSearchMatch]
     @Binding var selectedSearchMatchIndex: Int
+    @Binding var searchNavigationID: Int
     @Binding var selectedSection: RecordingDetailSection
     let deleteAction: () -> Void
     let reuploadAction: () -> Void
@@ -18,6 +19,7 @@ struct RecordingDetailView: View {
     @State private var renameTarget: SpeakerRenameTarget?
     @State private var speakerNameDraft = ""
     @StateObject private var audioPlayer = RecordingAudioPlayerModel()
+    @StateObject private var reading = TranscriptReadingState()
     @FocusState private var titleIsFocused: Bool
 
     var body: some View {
@@ -66,9 +68,16 @@ struct RecordingDetailView: View {
         }
         .onAppear {
             resetTitleEditor()
+            if !searchText.isEmpty { reading.suspendFollowing() }
             model.ensureTranscriptLoaded(for: recording)
             model.refreshMeetingChoices(for: recording)
         }
+        .onDisappear { audioPlayer.suspend() }
+        .onChange(of: model.captureState, initial: true) { _, state in
+            audioPlayer.setPlaybackBlocked(state != .ready)
+        }
+        .onChange(of: model.historySearchText) { _, _ in reading.suspendFollowing() }
+        .onChange(of: searchNavigationID) { _, _ in reading.suspendFollowing() }
         .onChange(of: recording.id) { _, _ in
             resetTitleEditor()
             model.ensureTranscriptLoaded(for: recording)
@@ -128,7 +137,7 @@ struct RecordingDetailView: View {
                 Text("·")
                 StatusLabel(recording: recording)
                 Spacer()
-                MeetingAssociationMenu(recording: recording)
+                MeetingAssociationMenu(recording: recording, willEdit: reading.suspendFollowing)
                     .environmentObject(model)
             }
             .font(.caption)
@@ -220,33 +229,31 @@ struct RecordingDetailView: View {
                     Divider()
                 }
 
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(Array(document.segments.enumerated()), id: \.offset) { index, segment in
-                                TranscriptSegmentRow(
-                                    recording: recording,
-                                    segment: segment,
-                                    searchText: normalizedSearch,
-                                    activeMatch: activeSearchMatch?.segmentIndex == index
-                                        ? activeSearchMatch
-                                        : nil,
-                                    renameAction: beginRename,
-                                    seekAction: { audioPlayer.seek(to: segment.start) },
-                                    canSeek: !audioPlayer.isLoading && audioPlayer.errorMessage == nil
-                                )
-                                .id(index)
-                                Divider()
-                                    .padding(.leading, 150)
-                            }
-                        }
-                        .padding(.horizontal, 28)
+                HStack {
+                    Toggle(isOn: $reading.followsAudio) {
+                        Label(reading.followsAudio ? "Following audio" : "Follow audio", systemImage: "text.line.first.and.arrowtriangle.forward")
                     }
-                    .onAppear { scrollToActiveSearchMatch(using: proxy) }
-                    .onChange(of: activeSearchMatch) { _, _ in
-                        scrollToActiveSearchMatch(using: proxy)
+                    .toggleStyle(.button)
+                    .disabled(audioPlayer.isLoading || audioPlayer.errorMessage != nil || audioPlayer.duration <= 0)
+                    .help("Keep the current sentence visible. Scrolling, selection, and search stop following.")
+                    Spacer()
+                    if audioPlayer.previewTime != nil {
+                        Label("Preview · \(formattedRecordingDuration(audioPlayer.displayTime))", systemImage: "hand.draw")
+                            .foregroundStyle(.orange)
+                    } else {
+                        Text("Audio · \(formattedRecordingDuration(audioPlayer.currentTime))")
+                            .foregroundStyle(.secondary)
                     }
                 }
+                .font(.caption)
+                .padding(.horizontal, 28)
+                .padding(.vertical, 8)
+
+                TranscriptTextView(
+                    document: document, recording: recording, player: audioPlayer, reading: reading,
+                    searchText: normalizedSearch, activeMatch: activeSearchMatch,
+                    searchNavigationID: searchNavigationID, rename: beginRename
+                )
             }
         } else if model.transcriptIsLoading(for: recording) {
             ContentUnavailableView {
@@ -395,7 +402,10 @@ struct RecordingDetailView: View {
             Divider()
                 .frame(height: 18)
 
-            Button(role: .destructive, action: deleteAction) {
+            Button(role: .destructive) {
+                reading.suspendFollowing()
+                deleteAction()
+            } label: {
                 Label(deletionActionTitle, systemImage: "trash")
                     .labelStyle(.iconOnly)
             }
@@ -497,12 +507,16 @@ struct RecordingDetailView: View {
 
     private func showNextSearchMatch() {
         guard !searchMatches.isEmpty else { return }
+        reading.suspendFollowing()
+        searchNavigationID += 1
         selectedSearchMatchIndex = (selectedSearchMatchIndex + 1) % searchMatches.count
         announceSearchMatch()
     }
 
     private func showPreviousSearchMatch() {
         guard !searchMatches.isEmpty else { return }
+        reading.suspendFollowing()
+        searchNavigationID += 1
         selectedSearchMatchIndex =
             (selectedSearchMatchIndex - 1 + searchMatches.count) % searchMatches.count
         announceSearchMatch()
@@ -515,17 +529,13 @@ struct RecordingDetailView: View {
         )
     }
 
-    private func scrollToActiveSearchMatch(using proxy: ScrollViewProxy) {
-        guard let activeSearchMatch else { return }
-        proxy.scrollTo(activeSearchMatch.segmentIndex, anchor: .center)
-    }
-
     private var hasTitleChanges: Bool {
         RecordingManifest.normalizedTitle(titleDraft) !=
             RecordingManifest.normalizedTitle(recording.displayTitle)
     }
 
     private func beginTitleEditing() {
+        reading.suspendFollowing()
         titleDraft = recording.displayTitle
         titleSaveErrorMessage = nil
         isEditingTitle = true
@@ -572,6 +582,7 @@ struct RecordingDetailView: View {
     }
 
     private func beginRename(_ segment: TranscriptSegment) {
+        reading.suspendFollowing()
         let target = SpeakerRenameTarget(channel: segment.channel, speaker: segment.speaker)
         speakerNameDraft = recording.speakerDisplayName(
             channel: segment.channel,
@@ -634,129 +645,6 @@ private struct SpeakerRenameTarget: Identifiable {
     var speaker: Int?
 
     var id: String { "\(channel):\(speaker ?? 0)" }
-}
-
-private struct TranscriptSegmentRow: View {
-    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
-    let recording: RecordingManifest
-    let segment: TranscriptSegment
-    let searchText: String
-    let activeMatch: TranscriptSearchMatch?
-    let renameAction: (TranscriptSegment) -> Void
-    let seekAction: () -> Void
-    let canSeek: Bool
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 16) {
-            VStack(alignment: .leading, spacing: 4) {
-                if canRename {
-                    Button {
-                        renameAction(segment)
-                    } label: {
-                        HStack(spacing: 5) {
-                            highlightedText(
-                                speakerName,
-                                query: searchText,
-                                activeOccurrence: activeSpeakerOccurrence,
-                                usesIncreasedContrast: colorSchemeContrast == .increased
-                            )
-                            .fontWeight(.semibold)
-                            Image(systemName: "pencil")
-                                .font(.caption2)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(speakerColor)
-                    .help("Rename this speaker in Call Recorder")
-                } else {
-                    highlightedText(
-                        speakerName,
-                        query: searchText,
-                        activeOccurrence: activeSpeakerOccurrence,
-                        usesIncreasedContrast: colorSchemeContrast == .increased
-                    )
-                        .fontWeight(.semibold)
-                        .foregroundStyle(speakerColor)
-                }
-
-                Button(action: seekAction) {
-                    Text(segmentTimestamp(segment.start))
-                        .font(.callout.monospacedDigit())
-                        .underline()
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.tint)
-                .disabled(!canSeek)
-                .help("Seek to \(segmentTimestamp(segment.start))")
-                .accessibilityLabel("Seek to \(segmentTimestamp(segment.start))")
-            }
-            .frame(width: 120, alignment: .leading)
-
-            highlightedText(
-                segment.text,
-                query: searchText,
-                activeOccurrence: activeTextOccurrence,
-                usesIncreasedContrast: colorSchemeContrast == .increased
-            )
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .lineSpacing(4)
-        }
-        .padding(.vertical, 16)
-    }
-
-    private var speakerName: String {
-        recording.speakerDisplayName(channel: segment.channel, speaker: segment.speaker)
-    }
-
-    private var canRename: Bool {
-        !(recording.effectiveOrigin == .nativeRecording && segment.channel == 1)
-    }
-
-    private var speakerColor: Color {
-        recording.effectiveOrigin == .nativeRecording && segment.channel == 1
-            ? .blue
-            : .purple
-    }
-
-    private var activeSpeakerOccurrence: Int? {
-        activeMatch?.field == .speaker ? activeMatch?.occurrenceIndex : nil
-    }
-
-    private var activeTextOccurrence: Int? {
-        activeMatch?.field == .text ? activeMatch?.occurrenceIndex : nil
-    }
-}
-
-private func highlightedText(
-    _ value: String,
-    query: String,
-    activeOccurrence: Int?,
-    usesIncreasedContrast: Bool
-) -> Text {
-    guard !query.isEmpty else { return Text(value) }
-    var attributed = AttributedString(value)
-    var searchStart = attributed.startIndex
-    var occurrenceIndex = 0
-    while searchStart < attributed.endIndex,
-          let range = attributed[searchStart...].range(
-              of: query,
-              options: [.caseInsensitive, .diacriticInsensitive]
-          ) {
-        if occurrenceIndex == activeOccurrence {
-            attributed[range].backgroundColor = Color.accentColor.opacity(
-                usesIncreasedContrast ? 0.55 : 0.35
-            )
-            attributed[range].foregroundColor = .primary
-        } else {
-            attributed[range].backgroundColor = Color.accentColor.opacity(
-                usesIncreasedContrast ? 0.32 : 0.16
-            )
-        }
-        searchStart = range.upperBound
-        occurrenceIndex += 1
-    }
-    return Text(attributed)
 }
 
 private func segmentTimestamp(_ interval: TimeInterval) -> String {

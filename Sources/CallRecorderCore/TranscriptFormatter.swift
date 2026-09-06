@@ -8,6 +8,7 @@ public struct TranscriptSegment: Equatable, Sendable {
     public var text: String
     public var transcriptionConfidence: Double?
     public var speakerConfidence: Double?
+    public var timedText: [TranscriptTimedText]
 
     public init(
         start: Double,
@@ -16,7 +17,8 @@ public struct TranscriptSegment: Equatable, Sendable {
         speaker: Int?,
         text: String,
         transcriptionConfidence: Double? = nil,
-        speakerConfidence: Double? = nil
+        speakerConfidence: Double? = nil,
+        timedText: [TranscriptTimedText] = []
     ) {
         self.start = start
         self.end = end
@@ -25,6 +27,7 @@ public struct TranscriptSegment: Equatable, Sendable {
         self.text = text
         self.transcriptionConfidence = transcriptionConfidence
         self.speakerConfidence = speakerConfidence
+        self.timedText = timedText
     }
 }
 
@@ -106,11 +109,27 @@ public struct TranscriptDocument: Equatable, Sendable {
                 ($0.channel?.value ?? 0) == channel
             }
             return (alternative.paragraphs?.paragraphs ?? []).compactMap { paragraph in
-                let text = paragraph.sentences
+                let rawText = paragraph.sentences
                     .map(\.text)
                     .joined(separator: " ")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty else { return nil }
+                let leadingLength = rawText.prefix(while: { $0.isWhitespace }).utf16.count
+                let retainedRange = NSRange(location: leadingLength, length: text.utf16.count)
+                var offset = 0
+                let timedText = paragraph.sentences.compactMap { sentence -> TranscriptTimedText? in
+                    let rawRange = NSRange(location: offset, length: sentence.text.utf16.count)
+                    offset += rawRange.length + 1
+                    let range = NSIntersectionRange(rawRange, retainedRange)
+                    guard range.length > 0,
+                          let start = sentence.start, let end = sentence.end,
+                          start.isFinite, end.isFinite, start >= 0, end > start,
+                          start >= paragraph.start, end <= paragraph.end else { return nil }
+                    return TranscriptTimedText(
+                        range: NSRange(location: range.location - leadingLength, length: range.length),
+                        start: start, end: end
+                    )
+                }
 
                 let words = (alternative.words ?? []).filter {
                     overlaps($0.start, $0.end, paragraph.start, paragraph.end)
@@ -136,7 +155,8 @@ public struct TranscriptDocument: Equatable, Sendable {
                     speaker: paragraph.speaker ?? words.first?.speaker,
                     text: text,
                     transcriptionConfidence: transcriptionConfidence,
-                    speakerConfidence: speakerConfidence
+                    speakerConfidence: speakerConfidence,
+                    timedText: timedText
                 )
             }
         }
@@ -524,6 +544,8 @@ private struct DeepgramParagraph: Decodable {
 
 private struct DeepgramSentence: Decodable {
     var text: String
+    var start: Double?
+    var end: Double?
 }
 
 private struct DeepgramUtterance: Decodable {
